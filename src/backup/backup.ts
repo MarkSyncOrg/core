@@ -1,4 +1,4 @@
-import type { Bookmark } from '../bookmarks/bookmark';
+import type { Bookmark } from '../bookmarks/bookmark.js';
 
 // Backup file format, compatible with the xBrowserSync ecosystem. The current shape
 // nests bookmarks under `xbrowsersync.data`; the legacy `xBrowserSync` shape is read

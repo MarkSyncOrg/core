@@ -24,7 +24,7 @@ import {
   getBookmarkType,
   SEPARATOR_URL,
   stripIds,
-} from '../bookmarks/bookmark';
+} from '../bookmarks/bookmark.js';
 
 /**
  * Merges `local` and `remote` against their common ancestor `base`, returning a single

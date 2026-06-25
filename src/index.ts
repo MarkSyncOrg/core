@@ -5,8 +5,8 @@
 // implementations and wire them into the SyncEngine.
 
 // Crypto
-export { CRYPTO_PARAMS, getPasswordHash, encryptData, decryptData } from './crypto/crypto';
-export { bytesToBase64, base64ToBytes } from './crypto/base64';
+export { CRYPTO_PARAMS, getPasswordHash, encryptData, decryptData } from './crypto/crypto.js';
+export { bytesToBase64, base64ToBytes } from './crypto/base64.js';
 
 // Bookmark model
 export {
@@ -29,7 +29,7 @@ export {
   canonicalizeBookmarks,
   serializeBookmarks,
   deserializeBookmarks,
-} from './bookmarks/bookmark';
+} from './bookmarks/bookmark.js';
 
 // API
 export {
@@ -38,8 +38,8 @@ export {
   type ServiceInfo,
   type CreateSyncResponse,
   type GetSyncResponse,
-} from './api/xbrowsersync-api';
-export { createApiClient } from './api/client';
+} from './api/xbrowsersync-api.js';
+export { createApiClient } from './api/client.js';
 
 // Sync engine + ports
 export {
@@ -49,13 +49,13 @@ export {
   type SyncEngineOptions,
   type SyncStatus,
   type SyncOutcome,
-} from './sync/sync-engine';
-export { type BookmarkProvider } from './sync/bookmark-provider';
-export { threeWayMerge } from './sync/merge';
-export { Mutex } from './sync/mutex';
+} from './sync/sync-engine.js';
+export { type BookmarkProvider } from './sync/bookmark-provider.js';
+export { threeWayMerge } from './sync/merge.js';
+export { Mutex } from './sync/mutex.js';
 
 // Storage port
-export { type StorageArea, MemoryStorageArea } from './storage/storage-area';
+export { type StorageArea, MemoryStorageArea } from './storage/storage-area.js';
 export {
   SyncStore,
   DEFAULT_SETTINGS,
@@ -63,7 +63,7 @@ export {
   type BookmarkIdMapping,
   type Settings,
   type Theme,
-} from './storage/sync-store';
+} from './storage/sync-store.js';
 
 // Backup
 export {
@@ -73,16 +73,16 @@ export {
   backupFilename,
   type Backup,
   type BackupSyncInfo,
-} from './backup/backup';
+} from './backup/backup.js';
 
 // Logging
-export { Logger, formatLog, type LogLevel, type LogEntry } from './log/logger';
+export { Logger, formatLog, type LogLevel, type LogEntry } from './log/logger.js';
 
 // QR (sync ID transfer)
-export { renderSyncIdQrSvg } from './qr';
+export { renderSyncIdQrSvg } from './qr.js';
 
 // Version helpers
-export { compareSemver, isVersionAtLeast } from './version';
+export { compareSemver, isVersionAtLeast } from './version.js';
 
 // Errors
 export {
@@ -100,4 +100,4 @@ export {
   UnexpectedResponseError,
   InvalidCredentialsError,
   SyncNotEnabledError,
-} from './errors';
+} from './errors.js';

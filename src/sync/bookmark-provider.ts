@@ -1,4 +1,4 @@
-import type { Bookmark } from '../bookmarks/bookmark';
+import type { Bookmark } from '../bookmarks/bookmark.js';
 
 /**
  * Reads and writes the browser's bookmarks as an xBrowserSync container tree. This is

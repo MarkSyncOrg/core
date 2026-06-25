@@ -1,5 +1,5 @@
 import lzutf8 from 'lzutf8';
-import { base64ToBytes, bytesToBase64 } from './base64';
+import { base64ToBytes, bytesToBase64 } from './base64.js';
 
 // Client-side encryption for xBrowserSync.
 //

@@ -1,5 +1,5 @@
 import createClient, { type Client } from 'openapi-fetch';
-import type { paths } from '../types/api';
+import type { paths } from '../types/api.js';
 
 /**
  * Creates a fully typed xBrowserSync API client bound to a given service URL.

@@ -1,16 +1,16 @@
-import { XbrowsersyncApi } from '../api/xbrowsersync-api';
+import { XbrowsersyncApi } from '../api/xbrowsersync-api.js';
 import {
   assignIds,
   type Bookmark,
   canonicalizeBookmarks,
   deserializeBookmarks,
   serializeBookmarks,
-} from '../bookmarks/bookmark';
-import { decryptData, encryptData, getPasswordHash } from '../crypto/crypto';
-import { InvalidCredentialsError, SyncNotEnabledError } from '../errors';
-import type { SyncInfo, SyncStore } from '../storage/sync-store';
-import type { BookmarkProvider } from './bookmark-provider';
-import { threeWayMerge } from './merge';
+} from '../bookmarks/bookmark.js';
+import { decryptData, encryptData, getPasswordHash } from '../crypto/crypto.js';
+import { InvalidCredentialsError, SyncNotEnabledError } from '../errors.js';
+import type { SyncInfo, SyncStore } from '../storage/sync-store.js';
+import type { BookmarkProvider } from './bookmark-provider.js';
+import { threeWayMerge } from './merge.js';
 
 /** The subset of the API client the engine uses (so tests can supply a fake). */
 export type ApiClient = Pick<

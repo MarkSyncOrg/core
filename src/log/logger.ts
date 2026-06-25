@@ -1,4 +1,4 @@
-import type { StorageArea } from '../storage/storage-area';
+import type { StorageArea } from '../storage/storage-area.js';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 

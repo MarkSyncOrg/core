@@ -1,4 +1,4 @@
-import type { components } from '../types/api';
+import type { components } from '../types/api.js';
 import {
   DailyNewSyncLimitReachedError,
   InvalidServiceError,
@@ -11,9 +11,9 @@ import {
   TooManyRequestsError,
   UnexpectedResponseError,
   UnsupportedApiVersionError,
-} from '../errors';
-import { isVersionAtLeast } from '../version';
-import { createApiClient } from './client';
+} from '../errors.js';
+import { isVersionAtLeast } from '../version.js';
+import { createApiClient } from './client.js';
 
 export type ServiceInfo = components['schemas']['ServiceInfo'];
 export type CreateSyncResponse = components['schemas']['CreateSyncResponse'];

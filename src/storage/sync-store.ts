@@ -1,4 +1,4 @@
-import type { StorageArea } from './storage-area';
+import type { StorageArea } from './storage-area.js';
 
 /** Credentials and endpoint for the active sync. */
 export interface SyncInfo {
