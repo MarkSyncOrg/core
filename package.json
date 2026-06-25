@@ -1,9 +1,16 @@
 {
   "name": "@xbrowsersync/core",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Platform-agnostic xBrowserSync core: crypto, API client, bookmark model and sync engine. Consumed by the PWA and the web-extension rewrite.",
   "license": "GPL-3.0-only",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xbrowsersync/core.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "packageManager": "pnpm@11.9.0",
   "engines": {
     "node": ">=22",

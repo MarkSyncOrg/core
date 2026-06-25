@@ -1,0 +1,35 @@
+name: Publish to GitHub Packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: '@xbrowsersync'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      # Publishes the prebuilt tarball (dist + openapi). Consumers install from the
+      # registry without running build scripts.
+      - run: pnpm publish --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
