@@ -1,0 +1,47 @@
+{
+  "name": "@xbrowsersync/core",
+  "version": "0.1.0",
+  "description": "Platform-agnostic xBrowserSync core: crypto, API client, bookmark model and sync engine. Consumed by the PWA and the web-extension rewrite.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=11"
+  },
+  "files": [
+    "dist",
+    "openapi"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "gen:api": "openapi-typescript openapi/xbrowsersync-api.yaml -o src/types/api.d.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "pnpm gen:api && pnpm build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:contract": "vitest run src/contract"
+  },
+  "dependencies": {
+    "lzutf8": "0.6.3",
+    "openapi-fetch": "0.17.0",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "1.5.6",
+    "@vitest/coverage-v8": "4.1.9",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

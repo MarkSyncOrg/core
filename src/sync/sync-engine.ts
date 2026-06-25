@@ -1,0 +1,315 @@
+import { XbrowsersyncApi } from '../api/xbrowsersync-api';
+import {
+  assignIds,
+  type Bookmark,
+  canonicalizeBookmarks,
+  deserializeBookmarks,
+  serializeBookmarks,
+} from '../bookmarks/bookmark';
+import { decryptData, encryptData, getPasswordHash } from '../crypto/crypto';
+import { InvalidCredentialsError, SyncNotEnabledError } from '../errors';
+import type { SyncInfo, SyncStore } from '../storage/sync-store';
+import type { BookmarkProvider } from './bookmark-provider';
+import { threeWayMerge } from './merge';
+
+/** The subset of the API client the engine uses (so tests can supply a fake). */
+export type ApiClient = Pick<
+  XbrowsersyncApi,
+  'getInfo' | 'createSync' | 'getSync' | 'getLastUpdated' | 'updateSync'
+>;
+
+export type ApiFactory = (serviceUrl: string) => ApiClient;
+
+export interface SyncEngineOptions {
+  store: SyncStore;
+  provider: BookmarkProvider;
+  /** Sync data format version this client writes (sent on create/update). */
+  appVersion: string;
+  /** Override the API client factory (defaults to the real HTTP client). */
+  createApi?: ApiFactory;
+}
+
+export interface SyncStatus {
+  enabled: boolean;
+  serviceUrl?: string;
+  syncId?: string;
+  lastUpdated?: string;
+}
+
+/**
+ * Result of a reconciling {@link SyncEngine.sync}:
+ * - `idle` — nothing to do (no local edits, remote unchanged)
+ * - `pushed` — local edits uploaded (remote was unchanged)
+ * - `pulled` — remote changes applied locally (no local edits)
+ * - `merged` — both sides changed; a three-way merge was applied locally and uploaded
+ */
+export type SyncOutcome = 'idle' | 'pushed' | 'pulled' | 'merged';
+
+/**
+ * Orchestrates bookmark synchronisation between the browser and an xBrowserSync
+ * service. Uses full-tree push/pull: the entire bookmark tree is encrypted and
+ * uploaded, or downloaded and applied. Change detection uses the `lastUpdated`
+ * timestamp; a server-side change during push surfaces as a SyncConflictError.
+ */
+export class SyncEngine {
+  private readonly store: SyncStore;
+  private readonly provider: BookmarkProvider;
+  private readonly appVersion: string;
+  private readonly createApi: ApiFactory;
+
+  constructor(options: SyncEngineOptions) {
+    this.store = options.store;
+    this.provider = options.provider;
+    this.appVersion = options.appVersion;
+    this.createApi = options.createApi ?? ((serviceUrl) => new XbrowsersyncApi(serviceUrl));
+  }
+
+  /**
+   * Creates a brand-new sync from the browser's current bookmarks and enables sync.
+   * Returns the generated sync ID (the user must save it to sync other devices).
+   */
+  async enableNewSync(serviceUrl: string, password: string): Promise<string> {
+    const api = this.createApi(serviceUrl);
+    await api.getInfo();
+
+    const created = await api.createSync(this.appVersion);
+    const passwordHash = await getPasswordHash(password, created.id);
+
+    const lastUpdated = await this.uploadLocal(
+      api,
+      created.id,
+      passwordHash,
+      created.lastUpdated,
+      this.appVersion,
+    );
+
+    await this.persist(
+      { serviceUrl, syncId: created.id, passwordHash },
+      created.version,
+      lastUpdated,
+    );
+    return created.id;
+  }
+
+  /**
+   * Enables sync against an existing sync ID, downloading and applying its bookmarks.
+   * Throws InvalidCredentialsError if the password cannot decrypt the data.
+   */
+  async enableExistingSync(serviceUrl: string, syncId: string, password: string): Promise<void> {
+    const api = this.createApi(serviceUrl);
+    await api.getInfo();
+
+    const passwordHash = await getPasswordHash(password, syncId);
+    const remote = await api.getSync(syncId);
+    const bookmarks = await this.decryptBookmarks(remote.bookmarks, passwordHash);
+
+    await this.applyRemote(bookmarks);
+    await this.persist({ serviceUrl, syncId, passwordHash }, remote.version, remote.lastUpdated);
+  }
+
+  /**
+   * Pulls remote bookmarks into the browser when the sync changed since the last pull.
+   * Returns true when local bookmarks were updated.
+   */
+  async pull(): Promise<boolean> {
+    const { api, info } = await this.requireSync();
+
+    const remoteLastUpdated = await api.getLastUpdated(info.syncId);
+    const localLastUpdated = await this.store.getLastUpdated();
+    if (remoteLastUpdated === localLastUpdated) {
+      return false;
+    }
+
+    const remote = await api.getSync(info.syncId);
+    const bookmarks = await this.decryptBookmarks(remote.bookmarks, info.passwordHash);
+    await this.applyRemote(bookmarks);
+    await this.store.setLastUpdated(remote.lastUpdated);
+    return true;
+  }
+
+  /**
+   * Pushes the browser's current bookmarks to the service. Throws SyncConflictError if
+   * the remote sync changed since the last pull; the caller should pull and retry.
+   */
+  async push(): Promise<void> {
+    const { api, info } = await this.requireSync();
+
+    const lastUpdated = await this.store.getLastUpdated();
+    const newLastUpdated = await this.uploadLocal(api, info.syncId, info.passwordHash, lastUpdated);
+    await this.store.setLastUpdated(newLastUpdated);
+  }
+
+  /**
+   * Reconciles this device with the service, choosing the safe action automatically:
+   * pushes when only local changed, pulls when only remote changed, and three-way
+   * merges when both changed (so neither side's edits are lost). Returns what it did.
+   *
+   * The merge applies locally and uploads against the server timestamp we merged from;
+   * if the server changed again in between, the upload raises SyncConflictError and the
+   * caller should retry.
+   */
+  async sync(): Promise<SyncOutcome> {
+    const { api, info } = await this.requireSync();
+
+    const remoteLastUpdated = await api.getLastUpdated(info.syncId);
+    const localLastUpdated = await this.store.getLastUpdated();
+    const remoteChanged = remoteLastUpdated !== localLastUpdated;
+    const dirty = await this.isDirty();
+
+    if (!remoteChanged) {
+      if (!dirty) {
+        return 'idle';
+      }
+      await this.push();
+      return 'pushed';
+    }
+    if (!dirty) {
+      await this.pull();
+      return 'pulled';
+    }
+
+    // Both sides changed: download remote, three-way merge against the cached base,
+    // apply the result locally, then upload it against the timestamp we merged from.
+    const remote = await api.getSync(info.syncId);
+    const remoteTree = await this.decryptBookmarks(remote.bookmarks, info.passwordHash);
+    const cached = await this.store.getCachedBookmarks();
+    const base = cached ? deserializeBookmarks(cached) : [];
+    const local = await this.provider.getBookmarks();
+
+    const merged = threeWayMerge(base, local, remoteTree);
+    await this.applyRemote(merged);
+    const newLastUpdated = await this.uploadLocal(
+      api,
+      info.syncId,
+      info.passwordHash,
+      remote.lastUpdated,
+    );
+    await this.store.setLastUpdated(newLastUpdated);
+    return 'merged';
+  }
+
+  /**
+   * Conflict recovery: discards local bookmarks and replaces them with the server's
+   * current state, ignoring the change-detection short-circuit that {@link pull} uses.
+   * Use when a device is stuck in conflict and the server copy is the source of truth.
+   */
+  async forcePull(): Promise<void> {
+    const { api, info } = await this.requireSync();
+    const remote = await api.getSync(info.syncId);
+    const bookmarks = await this.decryptBookmarks(remote.bookmarks, info.passwordHash);
+    await this.applyRemote(bookmarks);
+    await this.store.setLastUpdated(remote.lastUpdated);
+  }
+
+  /**
+   * Conflict recovery: overwrites the server with this device's current bookmarks,
+   * bypassing conflict detection by uploading against the server's latest timestamp.
+   * Use when a device is stuck in conflict and the local copy is the source of truth.
+   */
+  async forcePush(): Promise<void> {
+    const { api, info } = await this.requireSync();
+    const remoteLastUpdated = await api.getLastUpdated(info.syncId);
+    const newLastUpdated = await this.uploadLocal(
+      api,
+      info.syncId,
+      info.passwordHash,
+      remoteLastUpdated,
+    );
+    await this.store.setLastUpdated(newLastUpdated);
+  }
+
+  /**
+   * Replaces the browser's bookmarks with a restored tree (e.g. from a backup file) and,
+   * when sync is enabled, uploads it so the server converges on the restored state. The
+   * local apply refreshes the cache, so a later auto-pull does not mistake the restore
+   * for an un-pushed local edit. Callers must serialise this against other sync work.
+   */
+  async restore(bookmarks: Bookmark[]): Promise<void> {
+    if (await this.store.isSyncEnabled()) {
+      // applyRemote refreshes the cache; push then uploads the restored tree.
+      await this.applyRemote(bookmarks);
+      await this.push();
+    } else {
+      await this.provider.setBookmarks(bookmarks);
+    }
+  }
+
+  /**
+   * Whether the browser's bookmarks differ from the last-synced (cached) tree, i.e.
+   * there are local edits not yet pushed. Used to avoid overwriting them on auto-pull.
+   */
+  async isDirty(): Promise<boolean> {
+    const cached = await this.store.getCachedBookmarks();
+    if (cached === undefined) {
+      return false;
+    }
+    const current = canonicalizeBookmarks(await this.provider.getBookmarks());
+    return current !== cached;
+  }
+
+  /** Disables sync and clears all persisted sync state (browser bookmarks are kept). */
+  async disable(): Promise<void> {
+    await this.store.clear();
+  }
+
+  /** Returns the current sync status for display. */
+  async getStatus(): Promise<SyncStatus> {
+    const [info, enabled, lastUpdated] = await Promise.all([
+      this.store.getSyncInfo(),
+      this.store.isSyncEnabled(),
+      this.store.getLastUpdated(),
+    ]);
+    return {
+      enabled,
+      serviceUrl: info?.serviceUrl,
+      syncId: info?.syncId,
+      lastUpdated,
+    };
+  }
+
+  private async requireSync(): Promise<{ api: ApiClient; info: SyncInfo }> {
+    const info = await this.store.getSyncInfo();
+    if (!info || !(await this.store.isSyncEnabled())) {
+      throw new SyncNotEnabledError();
+    }
+    return { api: this.createApi(info.serviceUrl), info };
+  }
+
+  /** Encrypts and uploads the browser's current bookmarks, updating the cache. */
+  private async uploadLocal(
+    api: ApiClient,
+    syncId: string,
+    passwordHash: string,
+    lastUpdated: string | undefined,
+    version?: string,
+  ): Promise<string> {
+    const local = assignIds(await this.provider.getBookmarks());
+    const encrypted = await encryptData(serializeBookmarks(local), passwordHash);
+    const newLastUpdated = await api.updateSync(syncId, encrypted, lastUpdated, version);
+    await this.store.setCachedBookmarks(canonicalizeBookmarks(local));
+    return newLastUpdated;
+  }
+
+  /** Applies a remote tree to the browser and refreshes the cache. */
+  private async applyRemote(bookmarks: Bookmark[]): Promise<void> {
+    await this.provider.setBookmarks(bookmarks);
+    await this.store.setCachedBookmarks(canonicalizeBookmarks(bookmarks));
+  }
+
+  private async decryptBookmarks(encrypted: string, passwordHash: string): Promise<Bookmark[]> {
+    let json: string;
+    try {
+      json = await decryptData(encrypted, passwordHash);
+    } catch {
+      throw new InvalidCredentialsError();
+    }
+    return json ? deserializeBookmarks(json) : [];
+  }
+
+  private async persist(info: SyncInfo, version: string, lastUpdated: string): Promise<void> {
+    await this.store.setSyncInfo(info);
+    await this.store.setSyncVersion(version);
+    await this.store.setLastUpdated(lastUpdated);
+    await this.store.setSyncEnabled(true);
+  }
+}

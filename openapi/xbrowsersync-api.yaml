@@ -1,0 +1,465 @@
+openapi: 3.1.0
+info:
+  title: xBrowserSync API
+  version: 1.1.13
+  summary: Bookmark sync service API for the xBrowserSync ecosystem.
+  description: >
+    Machine-readable contract for the existing xBrowserSync backend
+    (https://github.com/xbrowsersync/api). This spec is the immutable contract the
+    rewritten web-extension client targets.
+
+
+    ## Encryption
+
+
+    All bookmark payloads (`bookmarks` fields) are **opaque ciphertext** produced
+    client-side. The server stores and returns them verbatim and never decrypts. The
+    client format is: LZUTF8-compress the JSON, AES-GCM encrypt it, prepend the 16-byte
+    IV, then Base64-encode the result. The key is derived with PBKDF2 (250 000
+    iterations, SHA-256). The server is unaware of any of this.
+
+
+    ## Versioning
+
+
+    The backend selects route behaviour from the `Accept-Version` request header
+    (semver). When omitted, the server falls back to its configured default
+    (currently `1.1.13`). This spec documents the current `^1.1.3` behaviour. Two
+    legacy `~1.0.0` variants exist (POST/PUT `/bookmarks` accepting a raw `bookmarks`
+    body without `version`); they are intentionally omitted because the rewrite always
+    sends a `version`.
+  license:
+    name: GPL-3.0-only
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: https://api.xbrowsersync.org
+    description: Official public service
+  - url: '{customServiceUrl}'
+    description: Self-hosted or third-party service
+    variables:
+      customServiceUrl:
+        default: http://localhost:8080
+        description: Base URL of a self-hosted xBrowserSync API instance
+
+tags:
+  - name: bookmarks
+    description: Encrypted bookmark sync operations
+  - name: service
+    description: Service status and capabilities
+
+paths:
+  /info:
+    get:
+      tags: [service]
+      operationId: getServiceInfo
+      summary: Get service info
+      description: >
+        Returns service status, version and limits. Clients MUST read `maxSyncSize`
+        from here at runtime rather than hard-coding a limit (it differs between
+        deployments — e.g. 1 MB on the public service vs a 512 KB default).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Service info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInfo'
+        '412':
+          $ref: '#/components/responses/UnsupportedVersion'
+        '429':
+          $ref: '#/components/responses/RequestThrottled'
+        '503':
+          $ref: '#/components/responses/ServiceNotAvailable'
+
+  /bookmarks:
+    post:
+      tags: [bookmarks]
+      operationId: createSync
+      summary: Create a new sync
+      description: >
+        Creates a new, empty sync identified by a freshly generated sync ID. The
+        client supplies only its sync `version`; bookmark data is uploaded later via
+        `PUT /bookmarks/{id}`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSyncRequest'
+      responses:
+        '200':
+          description: Sync created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSyncResponse'
+        '400':
+          $ref: '#/components/responses/RequiredDataNotFound'
+        '405':
+          $ref: '#/components/responses/NewSyncsForbidden'
+        '406':
+          $ref: '#/components/responses/NewSyncsLimitExceeded'
+        '412':
+          $ref: '#/components/responses/UnsupportedVersion'
+        '413':
+          $ref: '#/components/responses/SyncDataLimitExceeded'
+        '429':
+          $ref: '#/components/responses/RequestThrottled'
+        '503':
+          $ref: '#/components/responses/ServiceNotAvailable'
+
+  /bookmarks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SyncId'
+    get:
+      tags: [bookmarks]
+      operationId: getSync
+      summary: Get a sync
+      description: Retrieves the encrypted bookmarks, sync version and last-updated timestamp.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Sync data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetSyncResponse'
+        '401':
+          $ref: '#/components/responses/InvalidOrMissingSync'
+        '412':
+          $ref: '#/components/responses/UnsupportedVersion'
+        '429':
+          $ref: '#/components/responses/RequestThrottled'
+        '503':
+          $ref: '#/components/responses/ServiceNotAvailable'
+    put:
+      tags: [bookmarks]
+      operationId: updateSync
+      summary: Update a sync
+      description: >
+        Replaces the encrypted bookmarks for an existing sync. The client SHOULD send
+        the `lastUpdated` value it last observed; if it does not match the server's
+        current value the request is rejected with `409` to surface a sync conflict.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSyncRequest'
+      responses:
+        '200':
+          description: Sync updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateSyncResponse'
+        '400':
+          $ref: '#/components/responses/RequiredDataNotFound'
+        '401':
+          $ref: '#/components/responses/InvalidOrMissingSync'
+        '409':
+          $ref: '#/components/responses/SyncConflict'
+        '412':
+          $ref: '#/components/responses/UnsupportedVersion'
+        '413':
+          $ref: '#/components/responses/SyncDataLimitExceeded'
+        '429':
+          $ref: '#/components/responses/RequestThrottled'
+        '503':
+          $ref: '#/components/responses/ServiceNotAvailable'
+
+  /bookmarks/{id}/lastUpdated:
+    parameters:
+      - $ref: '#/components/parameters/SyncId'
+    get:
+      tags: [bookmarks]
+      operationId: getSyncLastUpdated
+      summary: Get sync last-updated timestamp
+      description: Lightweight poll used to detect whether a sync changed remotely.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Last-updated timestamp
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LastUpdatedResponse'
+        '401':
+          $ref: '#/components/responses/InvalidOrMissingSync'
+        '412':
+          $ref: '#/components/responses/UnsupportedVersion'
+        '429':
+          $ref: '#/components/responses/RequestThrottled'
+        '503':
+          $ref: '#/components/responses/ServiceNotAvailable'
+
+  /bookmarks/{id}/version:
+    parameters:
+      - $ref: '#/components/parameters/SyncId'
+    get:
+      tags: [bookmarks]
+      operationId: getSyncVersion
+      summary: Get sync version
+      description: Returns the sync data format version stored for this sync.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Sync version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+        '401':
+          $ref: '#/components/responses/InvalidOrMissingSync'
+        '412':
+          $ref: '#/components/responses/UnsupportedVersion'
+        '429':
+          $ref: '#/components/responses/RequestThrottled'
+        '503':
+          $ref: '#/components/responses/ServiceNotAvailable'
+
+components:
+  parameters:
+    AcceptVersion:
+      name: Accept-Version
+      in: header
+      required: false
+      description: >
+        Requested API version (semver). Omit to use the server default. The rewrite
+        sends the sync data format version it supports.
+      schema:
+        type: string
+        example: 1.1.13
+    SyncId:
+      name: id
+      in: path
+      required: true
+      description: Sync identifier (UUID v4, hyphens stripped).
+      schema:
+        $ref: '#/components/schemas/SyncId'
+
+  schemas:
+    SyncId:
+      type: string
+      description: UUID v4 with hyphens removed (32 lowercase hex characters).
+      pattern: '^[a-f0-9]{32}$'
+      examples:
+        - 52758cb942814faa9ab255208025ae65
+    EncryptedData:
+      type: string
+      description: >
+        Opaque Base64-encoded ciphertext (16-byte IV prepended to AES-GCM output of
+        LZUTF8-compressed JSON). Never interpreted server-side.
+    SyncVersion:
+      type: string
+      description: xBrowserSync sync data format version (semver).
+      examples:
+        - 1.1.13
+    Timestamp:
+      type: string
+      format: date-time
+      description: ISO 8601 timestamp.
+
+    ServiceInfo:
+      type: object
+      additionalProperties: false
+      required: [status, version, location, maxSyncSize, message]
+      properties:
+        status:
+          type: integer
+          description: '1 = online, 2 = offline, 3 = online but not accepting new syncs.'
+          enum: [1, 2, 3]
+        version:
+          $ref: '#/components/schemas/SyncVersion'
+        location:
+          type: string
+          description: ISO 3166-1 alpha-2 country code of the service (uppercase), or empty.
+          examples:
+            - GB
+        maxSyncSize:
+          type: integer
+          description: Maximum size of a sync payload in bytes.
+          examples:
+            - 1048576
+        message:
+          type: string
+          description: Service operator message (HTML, with script tags stripped).
+
+    CreateSyncRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          $ref: '#/components/schemas/SyncVersion'
+    CreateSyncResponse:
+      type: object
+      additionalProperties: false
+      required: [id, lastUpdated, version]
+      properties:
+        id:
+          $ref: '#/components/schemas/SyncId'
+        lastUpdated:
+          $ref: '#/components/schemas/Timestamp'
+        version:
+          $ref: '#/components/schemas/SyncVersion'
+
+    GetSyncResponse:
+      type: object
+      additionalProperties: false
+      required: [bookmarks, version, lastUpdated]
+      properties:
+        bookmarks:
+          $ref: '#/components/schemas/EncryptedData'
+        version:
+          $ref: '#/components/schemas/SyncVersion'
+        lastUpdated:
+          $ref: '#/components/schemas/Timestamp'
+
+    UpdateSyncRequest:
+      type: object
+      additionalProperties: false
+      required: [bookmarks]
+      properties:
+        bookmarks:
+          $ref: '#/components/schemas/EncryptedData'
+        lastUpdated:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: >
+            Last-updated value the client previously observed, for conflict detection.
+            If it does not match the server's current value the update is rejected (409).
+        version:
+          $ref: '#/components/schemas/SyncVersion'
+    UpdateSyncResponse:
+      type: object
+      additionalProperties: false
+      required: [lastUpdated]
+      properties:
+        lastUpdated:
+          $ref: '#/components/schemas/Timestamp'
+
+    LastUpdatedResponse:
+      type: object
+      additionalProperties: false
+      required: [lastUpdated]
+      properties:
+        lastUpdated:
+          $ref: '#/components/schemas/Timestamp'
+
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          $ref: '#/components/schemas/SyncVersion'
+
+    ApiError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable exception name.
+          examples:
+            - SyncNotFoundException
+        message:
+          type: string
+          description: Human-readable error message.
+
+  responses:
+    RequiredDataNotFound:
+      description: Required data missing from the request (RequiredDataNotFoundException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: RequiredDataNotFoundException
+            message: Unable to find required data
+    InvalidOrMissingSync:
+      description: >
+        Invalid sync ID (InvalidSyncIdException) or sync does not exist
+        (SyncNotFoundException). Both map to 401.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: SyncNotFoundException
+            message: Sync does not exist
+    NewSyncsForbidden:
+      description: The service is not accepting new syncs (NewSyncsForbiddenException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: NewSyncsForbiddenException
+            message: The service is not accepting new syncs
+    NewSyncsLimitExceeded:
+      description: Daily new-syncs limit exceeded for this client (NewSyncsLimitExceededException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: NewSyncsLimitExceededException
+            message: Client has exceeded the daily new syncs limit
+    SyncConflict:
+      description: A sync conflict was detected (SyncConflictException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: SyncConflictException
+            message: A sync conflict was detected
+    UnsupportedVersion:
+      description: The requested API version is not supported (UnsupportedVersionException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: UnsupportedVersionException
+            message: The requested API version is not supported
+    SyncDataLimitExceeded:
+      description: Sync data exceeds the service size limit (SyncDataLimitExceededException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: SyncDataLimitExceededException
+            message: Sync data limit exceeded
+    RequestThrottled:
+      description: Too many requests (RequestThrottledException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: RequestThrottledException
+            message: Too many requests
+    ServiceNotAvailable:
+      description: The service is currently offline (ServiceNotAvailableException).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: ServiceNotAvailableException
+            message: The service is currently offline

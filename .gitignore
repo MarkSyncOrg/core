@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+# generated from openapi/xbrowsersync-api.yaml via `pnpm gen:api`
+src/types/api.d.ts
+*.tsbuildinfo
+.DS_Store
