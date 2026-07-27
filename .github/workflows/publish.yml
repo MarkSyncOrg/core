@@ -22,7 +22,7 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://npm.pkg.github.com
-          scope: '@xbrowsersync'
+          scope: '@marksyncorg'
 
       - run: pnpm install --frozen-lockfile
 
