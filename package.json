@@ -1,12 +1,12 @@
 {
-  "name": "@xbrowsersync/core",
+  "name": "@marksyncorg/core",
   "version": "0.1.2",
   "description": "Platform-agnostic xBrowserSync core: crypto, API client, bookmark model and sync engine. Consumed by the PWA and the web-extension rewrite.",
   "license": "GPL-3.0-only",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xbrowsersync/core.git"
+    "url": "git+https://github.com/MarkSyncOrg/core.git"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"

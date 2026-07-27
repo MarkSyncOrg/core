@@ -1,4 +1,4 @@
-// Public entry point for @xbrowsersync/core.
+// Public entry point for @marksyncorg/core.
 //
 // Platform-agnostic: no DOM or browser-extension APIs. Consumers (the PWA, the
 // web-extension rewrite) provide their own StorageArea and BookmarkProvider
