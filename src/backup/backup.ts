@@ -1,5 +1,5 @@
 import type { Bookmark } from '../bookmarks/bookmark.js';
-import { acceptBookmarkTree } from '../bookmarks/validate.js';
+import { acceptBookmarkTreeWithReport, type SanitizeResult } from '../bookmarks/validate.js';
 
 // Backup file format, compatible with the xBrowserSync ecosystem. The current shape
 // nests bookmarks under `xbrowsersync.data`; the legacy `xBrowserSync` shape is read
@@ -59,13 +59,25 @@ export function buildBackup(
  * @throws {InvalidBookmarkDataError} if the bookmarks are not a well-formed tree.
  */
 export function extractBookmarks(backup: Backup): Bookmark[] {
+  return extractBookmarksWithReport(backup).bookmarks;
+}
+
+/**
+ * {@link extractBookmarks}, but also returning the nodes sanitisation dropped.
+ *
+ * A restore is destructive, and the dropped entries are not recoverable from the returned
+ * tree — read them here to tell the user what the file contained that will not come back.
+ *
+ * @throws {InvalidBookmarkDataError} if the bookmarks are not a well-formed tree.
+ */
+export function extractBookmarksWithReport(backup: Backup): SanitizeResult {
   const current = backup.xbrowsersync?.data?.bookmarks;
   if (current !== undefined) {
-    return acceptBookmarkTree(current);
+    return acceptBookmarkTreeWithReport(current);
   }
   const legacy = backup.xBrowserSync?.bookmarks;
   if (legacy !== undefined) {
-    return acceptBookmarkTree(legacy);
+    return acceptBookmarkTreeWithReport(legacy);
   }
   throw new Error('Unrecognised backup file');
 }

@@ -37,10 +37,15 @@ export {
 export {
   MAX_BOOKMARK_DEPTH,
   SAFE_URL_SCHEMES,
+  type RemovedBookmark,
+  type SanitizeResult,
   isSafeBookmarkUrl,
   validateBookmarkTree,
   sanitizeBookmarkTree,
+  sanitizeBookmarkTreeWithReport,
+  reinstateRemovedBookmarks,
   acceptBookmarkTree,
+  acceptBookmarkTreeWithReport,
 } from './bookmarks/validate.js';
 
 // API
@@ -83,6 +88,7 @@ export {
 export {
   buildBackup,
   extractBookmarks,
+  extractBookmarksWithReport,
   parseBackup,
   backupFilename,
   type Backup,

@@ -6,7 +6,13 @@ import {
   deserializeBookmarks,
   serializeBookmarks,
 } from '../bookmarks/bookmark.js';
-import { acceptBookmarkTree, sanitizeBookmarkTree } from '../bookmarks/validate.js';
+import {
+  acceptBookmarkTree,
+  acceptBookmarkTreeWithReport,
+  reinstateRemovedBookmarks,
+  type SanitizeResult,
+  sanitizeBookmarkTree,
+} from '../bookmarks/validate.js';
 import { decryptData, encryptData, getPasswordHash } from '../crypto/crypto.js';
 import { InvalidCredentialsError, SyncNotEnabledError, SyncNotFoundError } from '../errors.js';
 import type { SyncInfo, SyncStore } from '../storage/sync-store.js';
@@ -229,6 +235,11 @@ export class SyncEngine {
    * when sync is enabled, uploads it so the server converges on the restored state. The
    * local apply refreshes the cache, so a later auto-pull does not mistake the restore
    * for an un-pushed local edit. Callers must serialise this against other sync work.
+   *
+   * Unlike a pull, this replaces the local tree wholesale: nodes with unsafe URLs are not
+   * carried over, because the user asked for these bookmarks and not the current ones.
+   * Use `acceptBookmarkTreeWithReport` on the backup if you want to tell them what the
+   * restored file itself lost to sanitisation.
    */
   async restore(bookmarks: Bookmark[]): Promise<void> {
     // Restored trees usually come from a backup file, so validate here too rather than
@@ -236,7 +247,7 @@ export class SyncEngine {
     const restored = acceptBookmarkTree(bookmarks);
     if (await this.store.isSyncEnabled()) {
       // applyRemote refreshes the cache; push then uploads the restored tree.
-      await this.applyRemote(restored);
+      await this.applyRemote(restored, false);
       await this.push();
     } else {
       await this.provider.setBookmarks(restored);
@@ -293,7 +304,16 @@ export class SyncEngine {
    * on every check and sync in a loop.
    */
   private async localBookmarks(): Promise<Bookmark[]> {
-    return acceptBookmarkTree(await this.provider.getBookmarks());
+    return (await this.readLocal()).bookmarks;
+  }
+
+  /**
+   * The browser's current bookmarks, split into the tree the sync works with and the
+   * unsafe-URL nodes held back from it. {@link applyRemote} needs the second half: those
+   * nodes exist only in the browser, so a destructive write has to put them back.
+   */
+  private async readLocal(): Promise<SanitizeResult> {
+    return acceptBookmarkTreeWithReport(await this.provider.getBookmarks());
   }
 
   /** Encrypts and uploads the browser's current bookmarks, updating the cache. */
@@ -311,9 +331,27 @@ export class SyncEngine {
     return newLastUpdated;
   }
 
-  /** Applies a remote tree to the browser and refreshes the cache. */
-  private async applyRemote(bookmarks: Bookmark[]): Promise<void> {
-    await this.provider.setBookmarks(bookmarks);
+  /**
+   * Applies a remote tree to the browser and refreshes the cache.
+   *
+   * `setBookmarks` is a destructive full-tree write and the tree being written has been
+   * sanitised, so a bookmarklet the user keeps in the browser would be erased by it — the
+   * sync excludes such nodes, which is not the same as deleting them. They are put back
+   * before the write, at the position they held locally.
+   *
+   * The cache stores the tree *without* them, so it still mirrors what the service holds
+   * and {@link isDirty} keeps comparing two sanitised trees.
+   *
+   * @param preserveLocalUnsafe pass false for a restore, where replacing the whole local
+   * tree — bookmarklets included — is what the user asked for.
+   */
+  private async applyRemote(bookmarks: Bookmark[], preserveLocalUnsafe = true): Promise<void> {
+    let local = bookmarks;
+    if (preserveLocalUnsafe) {
+      const { removed } = await this.readLocal();
+      local = reinstateRemovedBookmarks(bookmarks, removed);
+    }
+    await this.provider.setBookmarks(local);
     await this.store.setCachedBookmarks(canonicalizeBookmarks(bookmarks));
   }
 

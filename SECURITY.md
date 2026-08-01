@@ -36,6 +36,25 @@ The recursive transforms (`canonicalizeBookmarks`, `stripIds`, `assignIds`,
 `cleanAllBookmarks`, `threeWayMerge`) assume validated input — that is what bounds their
 recursion depth. Do not call them on unvalidated data.
 
+Filtering is not deletion. Sanitisation decides what the library *accepts*, so a
+bookmarklet the user keeps in the browser is excluded from the sync but is not removed
+from the browser: `SyncEngine` puts such nodes back before the destructive write that
+applies a remote tree. If you write bookmarks yourself, either do the same via
+`sanitizeBookmarkTreeWithReport` / `reinstateRemovedBookmarks`, or tell the user what is
+about to disappear:
+
+```ts
+import { extractBookmarksWithReport } from '@marksyncorg/core';
+
+const { bookmarks, removed } = extractBookmarksWithReport(backup);
+if (removed.length > 0) {
+  // e.g. "3 entries were skipped because their addresses cannot be synced"
+}
+```
+
+The `removed` entries carry the node, the titles of the folders that held it and the
+index it occupied — enough to report them or to put them back.
+
 ## 2. Protect the storage area — it holds the decryption key
 
 `SyncInfo.passwordHash` is the Base64 PBKDF2 output, and that value **is** the AES key.
