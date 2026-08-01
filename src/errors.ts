@@ -50,3 +50,9 @@ export class InvalidCredentialsError extends XbsError {}
 
 /** An operation requiring an active sync was attempted while sync is disabled. */
 export class SyncNotEnabledError extends XbsError {}
+
+/**
+ * Bookmark data from an untrusted source (a backup file, a sync payload) is not a
+ * well-formed bookmark tree — wrong shape, wrong field types, or nested too deeply.
+ */
+export class InvalidBookmarkDataError extends XbsError {}

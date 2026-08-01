@@ -9,6 +9,17 @@ permissions:
   contents: read
   packages: write
 
+# TODO(supply-chain): pin the three actions below to full commit SHAs. They are floating
+# tags today, so a repointed or compromised tag would execute in a job that holds
+# `packages: write`. Resolve and apply with:
+#
+#   for a in actions/checkout actions/setup-node pnpm/action-setup; do
+#     gh api "repos/$a/git/ref/tags/v4" --jq "\"$a  \(.object.sha)\""
+#   done
+#
+# then rewrite each `uses:` as `owner/repo@<sha> # v4`. Left as tags rather than guessed
+# SHAs because an incorrect digest fails the job outright.
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -25,6 +36,12 @@ jobs:
           scope: '@marksyncorg'
 
       - run: pnpm install --frozen-lockfile
+
+      # Quality gate. The test suite is the only thing guarding the crypto, merge and
+      # validation logic, so a tag must not publish past a red build.
+      - run: pnpm typecheck
+
+      - run: pnpm test
 
       - run: pnpm build
 

@@ -1,4 +1,5 @@
 import type { Bookmark } from '../bookmarks/bookmark.js';
+import { acceptBookmarkTree } from '../bookmarks/validate.js';
 
 // Backup file format, compatible with the xBrowserSync ecosystem. The current shape
 // nests bookmarks under `xbrowsersync.data`; the legacy `xBrowserSync` shape is read
@@ -47,27 +48,41 @@ export function buildBackup(
   };
 }
 
-/** Extracts bookmarks from a backup (current or legacy shape). */
+/**
+ * Extracts bookmarks from a backup (current or legacy shape).
+ *
+ * A backup file is the least trusted input in the system — unauthenticated, unencrypted
+ * and picked from disk — so the extracted tree is fully validated and sanitised before
+ * it is handed back. Previously this tested only that the field was truthy, which let a
+ * string or a number through as a `Bookmark[]` and crashed later inside the tree walks.
+ *
+ * @throws {InvalidBookmarkDataError} if the bookmarks are not a well-formed tree.
+ */
 export function extractBookmarks(backup: Backup): Bookmark[] {
   const current = backup.xbrowsersync?.data?.bookmarks;
-  if (current) {
-    return current;
+  if (current !== undefined) {
+    return acceptBookmarkTree(current);
   }
   const legacy = backup.xBrowserSync?.bookmarks;
-  if (legacy) {
-    return legacy;
+  if (legacy !== undefined) {
+    return acceptBookmarkTree(legacy);
   }
   throw new Error('Unrecognised backup file');
 }
 
-/** Parses backup JSON text into a Backup, validating the shape. */
+/**
+ * Parses backup JSON text into a Backup, validating the shape.
+ *
+ * Note this returns the parsed container as-is; use {@link extractBookmarks} to obtain
+ * the validated, sanitised bookmark tree.
+ */
 export function parseBackup(json: string): Backup {
   const parsed: unknown = JSON.parse(json);
-  if (typeof parsed !== 'object' || parsed === null) {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('Unrecognised backup file');
   }
   const backup = parsed as Backup;
-  // Validate by attempting extraction (throws on unknown shapes).
+  // Validate by attempting extraction (throws on unknown or malformed shapes).
   extractBookmarks(backup);
   return backup;
 }

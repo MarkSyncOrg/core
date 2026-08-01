@@ -1,3 +1,5 @@
+import { validateBookmarkTree } from './validate.js';
+
 // The xBrowserSync bookmark data model and the pure transforms used to convert a
 // browser's native bookmark tree to/from it. This format is a compatibility contract:
 // the encrypted sync payload is exactly `JSON.stringify(Bookmark[])`, and other
@@ -55,7 +57,10 @@ export function trimToNearestWord(text: string | undefined, limit: number): stri
   if (limit >= trimmed.length) {
     return trimmed;
   }
-  return `${trimmed.substring(0, trimmed.lastIndexOf(' ', limit))}…`;
+  // lastIndexOf returns -1 when no space precedes the limit (a single long token).
+  // Falling back to a hard cut keeps the text; substring(0, -1) would discard all of it.
+  const boundary = trimmed.lastIndexOf(' ', limit);
+  return `${trimmed.substring(0, boundary === -1 ? limit : boundary)}…`;
 }
 
 /** Classifies a bookmark by its shape. */
@@ -115,6 +120,11 @@ export function eachBookmark(bookmarks: Bookmark[], iteratee: (bookmark: Bookmar
 /**
  * Creates a canonical bookmark. A URL makes it a leaf bookmark; otherwise it is a
  * folder (with an empty children array). Separators keep only their sentinel URL.
+ *
+ * Deliberately does not filter URL schemes — it is a model constructor, and the browser's
+ * own tree may legitimately contain bookmarklets. Trees built from untrusted input must
+ * go through `acceptBookmarkTree`, and anything about to be rendered as a link or
+ * navigated to should be checked with `isSafeBookmarkUrl` (see ./validate.ts).
  */
 export function newBookmark(
   title?: string,
@@ -150,7 +160,13 @@ export function newBookmark(
   return cleanBookmark(bookmark);
 }
 
-/** Converts a native bookmark tree into xBrowserSync bookmarks (without IDs). */
+/**
+ * Converts a native bookmark tree into xBrowserSync bookmarks (without IDs).
+ *
+ * Preserves URLs verbatim, including bookmarklets. The sync engine sanitises the local
+ * tree before it is uploaded or compared, so unsafe URLs never reach the service; a
+ * consumer calling this directly is responsible for the same check.
+ */
 export function nativeToBookmarks(nodes: NativeBookmarkNode[] = []): Bookmark[] {
   return nodes.map((node) => {
     if (node.type === 'separator' || node.url === SEPARATOR_URL) {
@@ -211,6 +227,10 @@ export function stripIds(bookmarks: Bookmark[]): Bookmark[] {
  * Returns a canonical, ID-independent serialisation used to compare two trees for
  * equality (e.g. dirty detection). IDs are excluded because they differ between a
  * locally rebuilt tree and the one stored remotely.
+ *
+ * Recurses, so it expects a tree already accepted by `validateBookmarkTree` — that is
+ * what bounds the depth. This is the hot path for dirty detection, so the check is not
+ * repeated here; callers handling untrusted input must validate first.
  */
 export function canonicalizeBookmarks(bookmarks: Bookmark[]): string {
   return serializeBookmarks(stripIds(bookmarks));
@@ -221,11 +241,14 @@ export function serializeBookmarks(bookmarks: Bookmark[]): string {
   return JSON.stringify(cleanAllBookmarks(bookmarks));
 }
 
-/** Parses the decrypted sync payload back into bookmarks. */
+/**
+ * Parses the decrypted sync payload back into bookmarks.
+ *
+ * The payload is authenticated by AES-GCM, but anyone sharing the sync can write it, so
+ * it is validated like any other untrusted input.
+ *
+ * @throws {InvalidBookmarkDataError} if the payload is not a well-formed bookmark tree.
+ */
 export function deserializeBookmarks(json: string): Bookmark[] {
-  const parsed: unknown = JSON.parse(json);
-  if (!Array.isArray(parsed)) {
-    throw new TypeError('Sync data is not a bookmark array');
-  }
-  return parsed as Bookmark[];
+  return validateBookmarkTree(JSON.parse(json));
 }
