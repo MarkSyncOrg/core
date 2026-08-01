@@ -1,0 +1,19 @@
+# pnpm 11 reads settings from here rather than the "pnpm" field in package.json.
+#
+# Every advisory below is build-time only: these packages reach the tree through
+# devDependencies (openapi-typescript, vitest) and never ship, since `files` publishes
+# only dist + openapi. Pinned anyway so `pnpm audit` stays quiet and a future *runtime*
+# advisory is not lost among known-benign noise.
+overrides:
+  brace-expansion: '>=2.1.3'  # GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg (DoS)
+  postcss: '>=8.5.18'         # GHSA-7fh5-64p2-3v2j (source-map path traversal)
+
+# Deliberately NOT overridden:
+#
+#   js-yaml (GHSA-h67p-54hq-rp68, quadratic-complexity DoS via YAML merge keys)
+#     The advisory's fixed range starts at 4.1.2, but no such release exists — the fix
+#     ships in 5.x, and @redocly/openapi-core (via openapi-typescript) reads
+#     `types.merge` off the v4 default export, which 5.x removed. Forcing it breaks
+#     `pnpm gen:api` outright. The only input js-yaml parses here is this repo's own
+#     openapi/xbrowsersync-api.yaml at build time, so the DoS has no untrusted source.
+#     Revisit when openapi-typescript ships a redocly version built against js-yaml 5.

@@ -31,10 +31,24 @@ export {
   deserializeBookmarks,
 } from './bookmarks/bookmark.js';
 
+// Bookmark validation / sanitisation (trust-boundary helpers).
+// `isSafeBookmarkUrl` is also the render-time guard consumers should use before turning
+// a bookmark into an <a href> or navigating to it.
+export {
+  MAX_BOOKMARK_DEPTH,
+  SAFE_URL_SCHEMES,
+  isSafeBookmarkUrl,
+  validateBookmarkTree,
+  sanitizeBookmarkTree,
+  acceptBookmarkTree,
+} from './bookmarks/validate.js';
+
 // API
 export {
   XbrowsersyncApi,
   MIN_API_VERSION,
+  normalizeServiceUrl,
+  isValidSyncId,
   type ServiceInfo,
   type CreateSyncResponse,
   type GetSyncResponse,
@@ -76,7 +90,7 @@ export {
 } from './backup/backup.js';
 
 // Logging
-export { Logger, formatLog, type LogLevel, type LogEntry } from './log/logger.js';
+export { Logger, formatLog, redactSensitive, type LogLevel, type LogEntry } from './log/logger.js';
 
 // QR (sync ID transfer)
 export { renderSyncIdQrSvg } from './qr.js';
@@ -100,4 +114,5 @@ export {
   UnexpectedResponseError,
   InvalidCredentialsError,
   SyncNotEnabledError,
+  InvalidBookmarkDataError,
 } from './errors.js';

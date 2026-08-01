@@ -17,19 +17,24 @@ they are part of the result, not omissions.
 
 ## Summary
 
-| # | Severity | Finding | Location |
-|---|----------|---------|----------|
-| 1 | **High** | Bookmark URLs are never scheme-validated (`javascript:`, `data:`) | `src/bookmarks/bookmark.ts:119` |
-| 2 | **Medium** | `parseBackup` does no schema validation on unauthenticated input | `src/backup/backup.ts:51` |
-| 3 | **Medium** | Unbounded recursion over bookmark trees → stack-overflow DoS | `src/bookmarks/bookmark.ts:95`, `src/sync/merge.ts:86` |
-| 4 | **Medium** | `serviceUrl` accepted with no validation or scheme allowlist | `src/api/xbrowsersync-api.ts:79` |
-| 5 | **Medium** | Publish workflow has no test gate and uses mutable action tags | `.github/workflows/publish.yml:27` |
-| 6 | Low | Derived AES key persisted in plaintext storage | `src/storage/sync-store.ts:9` |
-| 7 | Low | No rollback protection against a malicious/compromised service | `src/sync/sync-engine.ts:114` |
-| 8 | Low | 5 vulnerable transitive dependencies (all dev-only) | `pnpm-lock.yaml` |
-| 9 | Low | Sync-ID format declared in OpenAPI but never enforced client-side | `openapi/xbrowsersync-api.yaml:255` |
-| 10 | Info | `trimToNearestWord` discards the whole string when no space precedes the limit | `src/bookmarks/bookmark.ts:50` |
-| 11 | Info | Logger persists unredacted messages beside credentials | `src/log/logger.ts:25` |
+| # | Severity | Finding | Location | Status |
+|---|----------|---------|----------|--------|
+| 1 | **High** | Bookmark URLs are never scheme-validated (`javascript:`, `data:`) | `src/bookmarks/bookmark.ts:119` | **Fixed** |
+| 2 | **Medium** | `parseBackup` does no schema validation on unauthenticated input | `src/backup/backup.ts:51` | **Fixed** |
+| 3 | **Medium** | Unbounded recursion over bookmark trees → stack-overflow DoS | `src/bookmarks/bookmark.ts:95`, `src/sync/merge.ts:86` | **Fixed** |
+| 4 | **Medium** | `serviceUrl` accepted with no validation or scheme allowlist | `src/api/xbrowsersync-api.ts:79` | **Fixed** |
+| 5 | **Medium** | Publish workflow has no test gate and uses mutable action tags | `.github/workflows/publish.yml:27` | Partly fixed |
+| 6 | Low | Derived AES key persisted in plaintext storage | `src/storage/sync-store.ts:9` | Documented |
+| 7 | Low | No rollback protection against a malicious/compromised service | `src/sync/sync-engine.ts:114` | Documented |
+| 8 | Low | 5 vulnerable transitive dependencies (all dev-only) | `pnpm-lock.yaml` | Partly fixed |
+| 9 | Low | Sync-ID format declared in OpenAPI but never enforced client-side | `openapi/xbrowsersync-api.yaml:255` | **Fixed** |
+| 10 | Info | `trimToNearestWord` discards the whole string when no space precedes the limit | `src/bookmarks/bookmark.ts:50` | **Fixed** |
+| 11 | Info | Logger persists unredacted messages beside credentials | `src/log/logger.ts:25` | **Fixed** |
+
+Remediation is described in [Remediation](#remediation) at the end of this document, and
+the findings below describe the code **as it was when reviewed**. Findings 6 and 7 are
+constrained by the xBrowserSync compatibility contract and are documented for consumers
+in [SECURITY.md](./SECURITY.md) rather than fixed.
 
 ---
 
@@ -277,20 +282,95 @@ Tested and cleared — recorded so they are not re-investigated:
 
 ---
 
-## Recommended order of work
+## Remediation
 
-1. **Finding 1** — URL scheme allowlist. Highest impact, contained change, no wire-format risk.
-2. **Findings 2 + 3** — one hardened validator at the untrusted-input boundary
-   (`extractBookmarks` and post-decrypt) fixes both: shape validation plus a depth cap.
-3. **Finding 4** — validate `serviceUrl` in the `XbrowsersyncApi` constructor.
-4. **Finding 5** — add `pnpm test` to the publish job and pin actions to SHAs. Cheapest fix here.
-5. Findings 8–10 as routine cleanup.
+All findings have been addressed. `src/security.test.ts` pins each one with a regression
+test named for the finding it guards, so reopening one fails the suite with the reason
+attached. Suite: **168 passing** (113 before), typecheck clean.
 
-Findings 6 and 7 are constrained by the xBrowserSync compatibility contract and should be
-documented for consumers rather than fixed.
+**A single trust boundary (findings 1–3).** The structural gap noted below — the
+authenticated path validated more strictly than the unauthenticated one — is closed by
+`src/bookmarks/validate.ts`, which every tree from an untrusted source now passes
+through:
 
-**A note on scope.** Findings 1–3 all describe the same structural gap: the package validates
-the *authenticated* path (`deserializeBookmarks`) more strictly than the *unauthenticated* one
-(`parseBackup`). A single shared validation entry point applied to every tree crossing the trust
-boundary — from backup, from decrypt, from the native browser tree — would close all three and
-prevent the asymmetry from reopening.
+- `validateBookmarkTree` — checks the value is an array and every node's field types,
+  and caps nesting at `MAX_BOOKMARK_DEPTH` (200). The walk is **iterative**, because a
+  recursive validator would overflow on exactly the input it exists to reject. Unknown
+  properties are tolerated so a newer client's fields do not make a tree unreadable.
+- `sanitizeBookmarkTree` — drops nodes whose URL is not in `SAFE_URL_SCHEMES`, together
+  with their subtrees. Scheme checks parse via `URL`, so `JavaScript:`, leading
+  whitespace and embedded newlines normalise before comparison.
+- `acceptBookmarkTree` — both, and the entry point applied at `extractBookmarks`,
+  `deserializeBookmarks`, `SyncEngine.restore` and the decrypt path.
+
+Two consequences worth recording:
+
+- **Sanitisation is symmetric.** `SyncEngine.localBookmarks()` filters the local tree on
+  every read, not just the remote one. Filtering one side only would leave local and
+  cached permanently unequal, and `isDirty()` compares them — the device would look
+  edited on every check and sync in a loop. A regression test pins this.
+- **The pure constructors still do not filter.** `newBookmark` and `nativeToBookmarks`
+  preserve URLs verbatim, since the browser's own tree may hold user-created
+  bookmarklets. The engine filters before anything is uploaded or compared, and
+  `isSafeBookmarkUrl` is exported as the render-time guard. This contract is now stated
+  in their doc comments and in SECURITY.md.
+
+**Finding 4.** `normalizeServiceUrl` parses the URL, requires `https` (allowing `http`
+only for loopback, so self-hosting still works), and rejects embedded credentials and
+any query or fragment. The query/fragment check runs against the **raw input**: a bare
+trailing `?` or `#` parses to an empty `search`/`hash` yet still survives into `href` and
+would swallow every appended endpoint path. The result is rebuilt from `origin +
+pathname` so nothing else can survive normalisation.
+
+**Finding 9.** `isValidSyncId` enforces the OpenAPI `SyncId` pattern in the four API
+methods that take one, and in `enableExistingSync` ahead of the 250k-iteration key
+derivation so a typo fails fast with a message about the ID.
+
+**Finding 5 — partly fixed.** `pnpm typecheck` and `pnpm test` now gate the publish job,
+so a tag cannot publish past a red build. The actions are **still on floating tags**: the
+GitHub API is outside this session's repository scope, so the real commit SHAs could not
+be resolved, and a guessed digest fails the job outright. The workflow carries a `TODO`
+with the exact `gh api` command to resolve and apply them — this remains open.
+
+**Finding 8 — partly fixed.** `pnpm-workspace.yaml` (pnpm 11's home for overrides; the
+`package.json` field is ignored) pins `brace-expansion` and `postcss`. Audit is down from
+**5 vulnerabilities to 2**, both the same `js-yaml` advisory. That one is deliberately
+**not** overridden: the advisory's fixed range starts at 4.1.2, but no such release
+exists — the fix ships in 5.x, which removed the `types.merge` export that
+`@redocly/openapi-core` reads, so forcing it breaks `pnpm gen:api` outright (verified).
+The only YAML it parses is this repo's own spec at build time, so there is no untrusted
+input. The reasoning is recorded in `pnpm-workspace.yaml`.
+
+**Findings 10 and 11.** `trimToNearestWord` hard-cuts at the limit when no word boundary
+precedes it, instead of returning a bare ellipsis. `Logger` scrubs sync IDs, Base64 keys
+and URL credentials via `redactSensitive` at write time, so the trace log is never
+sensitive rather than needing sanitising before each share.
+
+### Changes to existing tests
+
+Two pre-existing tests were updated to match intended behaviour changes, not to
+accommodate breakage:
+
+- `src/api/xbrowsersync-api.test.ts` used the placeholder sync ID `'id1'`, which the new
+  format check rejects; it now uses a valid 32-hex ID.
+- `src/bookmarks/bookmark.test.ts` expected `TypeError` from `deserializeBookmarks`; it
+  now expects `InvalidBookmarkDataError`, which joins the existing `XbsError` hierarchy
+  so callers can branch on cause. **This is a breaking change for any consumer catching
+  `TypeError` from that function.**
+
+## Still open
+
+1. **Pin the three GitHub Actions to commit SHAs** (finding 5). The only item requiring
+   action; the workflow carries the command to resolve them.
+2. **Revisit the `js-yaml` advisory** (finding 8) when `openapi-typescript` ships a
+   `@redocly/openapi-core` built against js-yaml 5.
+3. **Findings 6 and 7** are protocol constraints, not defects to fix. They are documented
+   for consumers in [SECURITY.md](./SECURITY.md); revisiting either means breaking
+   compatibility with the wider xBrowserSync ecosystem, which is a product decision.
+
+**A note on scope.** Findings 1–3 all described the same structural gap: the package
+validated the *authenticated* path (`deserializeBookmarks`) more strictly than the
+*unauthenticated* one (`parseBackup`). The shared entry point in
+`src/bookmarks/validate.ts` closes all three and is what prevents the asymmetry from
+reopening — new code paths handling untrusted trees should call `acceptBookmarkTree`
+rather than re-implementing checks.

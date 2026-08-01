@@ -64,6 +64,68 @@ function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/** Hosts for which plain HTTP is tolerated, so a self-hosted service can be run locally. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/**
+ * Sync IDs are UUID v4s with the hyphens removed, per the OpenAPI contract's `SyncId`
+ * schema. openapi-fetch is types-only and performs no runtime checking, so the pattern
+ * is enforced here.
+ */
+const SYNC_ID_PATTERN = /^[a-f0-9]{32}$/;
+
+/**
+ * Parses and validates a service URL, returning it normalised without a trailing slash.
+ *
+ * The base URL is concatenated with each endpoint path, so an unvalidated value does
+ * more than pick a host:
+ *   - a non-HTTPS scheme exposes the sync ID (and the request pattern) to the network,
+ *     and hands an active attacker control of every response;
+ *   - a query string or fragment swallows the endpoint path, collapsing `/info`,
+ *     `/bookmarks/{id}` and `/lastUpdated` onto one URL — which would let a single
+ *     crafted response satisfy the `getInfo` check on behalf of all of them;
+ *   - embedded credentials would be sent to the service and logged with the URL.
+ *
+ * @throws {InvalidServiceError} if the URL is unusable as an xBrowserSync service base.
+ */
+export function normalizeServiceUrl(serviceUrl: string): string {
+  const trimmed = serviceUrl.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new InvalidServiceError('Service URL is not a valid absolute URL');
+  }
+  const isLoopback = LOOPBACK_HOSTS.has(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopback)) {
+    throw new InvalidServiceError(
+      'Service URL must use https (http is allowed only for loopback addresses)',
+    );
+  }
+  // Tested on the raw input, not on `parsed`: a bare trailing `?` or `#` parses to an
+  // empty search/hash but still survives into `href`, and would then swallow every
+  // endpoint path appended to it.
+  if (trimmed.includes('?') || trimmed.includes('#')) {
+    throw new InvalidServiceError('Service URL must not contain a query string or fragment');
+  }
+  if (parsed.username || parsed.password) {
+    throw new InvalidServiceError('Service URL must not contain embedded credentials');
+  }
+  // Rebuilt from origin + path so nothing but the base survives normalisation.
+  return stripTrailingSlash(`${parsed.origin}${parsed.pathname}`);
+}
+
+/** Whether a string is a well-formed xBrowserSync sync ID. */
+export function isValidSyncId(syncId: string): boolean {
+  return SYNC_ID_PATTERN.test(syncId);
+}
+
+function assertValidSyncId(syncId: string): void {
+  if (!isValidSyncId(syncId)) {
+    throw new SyncNotFoundError('Sync ID must be 32 lowercase hexadecimal characters');
+  }
+}
+
 /**
  * Typed client for a single xBrowserSync service. All bookmark payloads are opaque
  * ciphertext — encryption/decryption is the caller's responsibility (see crypto).
@@ -77,7 +139,7 @@ export class XbrowsersyncApi {
   private readonly client: ReturnType<typeof createApiClient>;
 
   constructor(serviceUrl: string) {
-    this.serviceUrl = stripTrailingSlash(serviceUrl);
+    this.serviceUrl = normalizeServiceUrl(serviceUrl);
     this.client = createApiClient(this.serviceUrl);
   }
 
@@ -106,6 +168,7 @@ export class XbrowsersyncApi {
 
   /** Retrieves a sync's encrypted bookmarks, version and last-updated timestamp. */
   async getSync(id: string): Promise<GetSyncResponse> {
+    assertValidSyncId(id);
     const data = await this.send<GetSyncResponse>(() =>
       this.client.GET('/bookmarks/{id}', { params: { path: { id } } }),
     );
@@ -117,6 +180,7 @@ export class XbrowsersyncApi {
 
   /** Returns the sync's last-updated timestamp (used for change detection). */
   async getLastUpdated(id: string): Promise<string> {
+    assertValidSyncId(id);
     const data = await this.send<components['schemas']['LastUpdatedResponse']>(() =>
       this.client.GET('/bookmarks/{id}/lastUpdated', { params: { path: { id } } }),
     );
@@ -128,6 +192,7 @@ export class XbrowsersyncApi {
 
   /** Returns the sync data format version stored for a sync. */
   async getSyncVersion(id: string): Promise<string> {
+    assertValidSyncId(id);
     const data = await this.send<components['schemas']['VersionResponse']>(() =>
       this.client.GET('/bookmarks/{id}/version', { params: { path: { id } } }),
     );
@@ -150,6 +215,7 @@ export class XbrowsersyncApi {
     lastUpdated?: string,
     version?: string,
   ): Promise<string> {
+    assertValidSyncId(id);
     const data = await this.send<components['schemas']['UpdateSyncResponse']>(() =>
       this.client.PUT('/bookmarks/{id}', {
         params: { path: { id } },

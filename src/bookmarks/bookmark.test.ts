@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { InvalidBookmarkDataError } from '../errors';
 import {
   assignIds,
   type Bookmark,
@@ -175,7 +176,7 @@ describe('serialize / deserialize', () => {
   });
 
   it('rejects non-array payloads', () => {
-    expect(() => deserializeBookmarks('{"not":"array"}')).toThrow(TypeError);
+    expect(() => deserializeBookmarks('{"not":"array"}')).toThrow(InvalidBookmarkDataError);
   });
 });
 

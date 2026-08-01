@@ -12,6 +12,8 @@ import {
 import { XbrowsersyncApi } from './xbrowsersync-api';
 
 const SERVICE_URL = 'https://api.example.org';
+// A sync ID is a UUID v4 with hyphens removed; the client now enforces that shape.
+const SYNC_ID = '52758cb942814faa9ab255208025ae65';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -125,19 +127,19 @@ describe('XbrowsersyncApi.getSync', () => {
         lastUpdated: '2026-01-01T00:00:00.000Z',
       }),
     );
-    const data = await new XbrowsersyncApi(SERVICE_URL).getSync('id1');
+    const data = await new XbrowsersyncApi(SERVICE_URL).getSync(SYNC_ID);
     expect(data.bookmarks).toBe('cipher');
   });
 
   it('defaults missing bookmarks to an empty string', async () => {
     mockFetch(() => jsonResponse({ version: '1.1.13', lastUpdated: '2026-01-01T00:00:00.000Z' }));
-    const data = await new XbrowsersyncApi(SERVICE_URL).getSync('id1');
+    const data = await new XbrowsersyncApi(SERVICE_URL).getSync(SYNC_ID);
     expect(data.bookmarks).toBe('');
   });
 
   it('maps 401 to SyncNotFoundError', async () => {
     mockFetch(() => jsonResponse({ code: 'SyncNotFoundException', message: 'gone' }, 401));
-    await expect(new XbrowsersyncApi(SERVICE_URL).getSync('id1')).rejects.toBeInstanceOf(
+    await expect(new XbrowsersyncApi(SERVICE_URL).getSync(SYNC_ID)).rejects.toBeInstanceOf(
       SyncNotFoundError,
     );
   });
@@ -147,14 +149,14 @@ describe('XbrowsersyncApi.updateSync', () => {
   it('sends bookmarks plus the conflict-detection timestamp', async () => {
     const fetchMock = mockFetch(() => jsonResponse({ lastUpdated: '2026-02-02T00:00:00.000Z' }));
     const lastUpdated = await new XbrowsersyncApi(SERVICE_URL).updateSync(
-      'id1',
+      SYNC_ID,
       'cipher',
       '2026-01-01T00:00:00.000Z',
     );
 
     expect(lastUpdated).toBe('2026-02-02T00:00:00.000Z');
     const call = await readCall(fetchMock);
-    expect(call.url).toBe(`${SERVICE_URL}/bookmarks/id1`);
+    expect(call.url).toBe(`${SERVICE_URL}/bookmarks/${SYNC_ID}`);
     expect(call.method).toBe('PUT');
     expect(JSON.parse(call.body)).toEqual({
       bookmarks: 'cipher',
@@ -165,14 +167,14 @@ describe('XbrowsersyncApi.updateSync', () => {
   it('maps 409 to SyncConflictError', async () => {
     mockFetch(() => jsonResponse({ code: 'SyncConflictException', message: 'conflict' }, 409));
     await expect(
-      new XbrowsersyncApi(SERVICE_URL).updateSync('id1', 'cipher', 'ts'),
+      new XbrowsersyncApi(SERVICE_URL).updateSync(SYNC_ID, 'cipher', 'ts'),
     ).rejects.toBeInstanceOf(SyncConflictError);
   });
 
   it('maps 413 to RequestEntityTooLargeError', async () => {
     mockFetch(() => jsonResponse({ code: 'SyncDataLimitExceededException', message: 'big' }, 413));
     await expect(
-      new XbrowsersyncApi(SERVICE_URL).updateSync('id1', 'cipher'),
+      new XbrowsersyncApi(SERVICE_URL).updateSync(SYNC_ID, 'cipher'),
     ).rejects.toBeInstanceOf(RequestEntityTooLargeError);
   });
 });
@@ -180,21 +182,21 @@ describe('XbrowsersyncApi.updateSync', () => {
 describe('XbrowsersyncApi polling endpoints', () => {
   it('getLastUpdated returns the timestamp', async () => {
     mockFetch(() => jsonResponse({ lastUpdated: '2026-03-03T00:00:00.000Z' }));
-    expect(await new XbrowsersyncApi(SERVICE_URL).getLastUpdated('id1')).toBe(
+    expect(await new XbrowsersyncApi(SERVICE_URL).getLastUpdated(SYNC_ID)).toBe(
       '2026-03-03T00:00:00.000Z',
     );
   });
 
   it('getSyncVersion returns the version', async () => {
     mockFetch(() => jsonResponse({ version: '1.1.13' }));
-    expect(await new XbrowsersyncApi(SERVICE_URL).getSyncVersion('id1')).toBe('1.1.13');
+    expect(await new XbrowsersyncApi(SERVICE_URL).getSyncVersion(SYNC_ID)).toBe('1.1.13');
   });
 });
 
 describe('XbrowsersyncApi URL handling', () => {
   it('strips a trailing slash from the service URL', async () => {
     const fetchMock = mockFetch(() => jsonResponse({ lastUpdated: 'ts' }));
-    await new XbrowsersyncApi(`${SERVICE_URL}/`).getLastUpdated('id1');
-    expect((await readCall(fetchMock)).url).toBe(`${SERVICE_URL}/bookmarks/id1/lastUpdated`);
+    await new XbrowsersyncApi(`${SERVICE_URL}/`).getLastUpdated(SYNC_ID);
+    expect((await readCall(fetchMock)).url).toBe(`${SERVICE_URL}/bookmarks/${SYNC_ID}/lastUpdated`);
   });
 });

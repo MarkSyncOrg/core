@@ -1,4 +1,4 @@
-import { XbrowsersyncApi } from '../api/xbrowsersync-api.js';
+import { isValidSyncId, XbrowsersyncApi } from '../api/xbrowsersync-api.js';
 import {
   assignIds,
   type Bookmark,
@@ -6,8 +6,9 @@ import {
   deserializeBookmarks,
   serializeBookmarks,
 } from '../bookmarks/bookmark.js';
+import { acceptBookmarkTree, sanitizeBookmarkTree } from '../bookmarks/validate.js';
 import { decryptData, encryptData, getPasswordHash } from '../crypto/crypto.js';
-import { InvalidCredentialsError, SyncNotEnabledError } from '../errors.js';
+import { InvalidCredentialsError, SyncNotEnabledError, SyncNotFoundError } from '../errors.js';
 import type { SyncInfo, SyncStore } from '../storage/sync-store.js';
 import type { BookmarkProvider } from './bookmark-provider.js';
 import { threeWayMerge } from './merge.js';
@@ -96,6 +97,11 @@ export class SyncEngine {
    * Throws InvalidCredentialsError if the password cannot decrypt the data.
    */
   async enableExistingSync(serviceUrl: string, syncId: string, password: string): Promise<void> {
+    if (!isValidSyncId(syncId)) {
+      // Checked before the 250k-iteration key derivation so a typo fails fast, with a
+      // message about the ID rather than an opaque lookup failure a round trip later.
+      throw new SyncNotFoundError('Sync ID must be 32 lowercase hexadecimal characters');
+    }
     const api = this.createApi(serviceUrl);
     await api.getInfo();
 
@@ -174,7 +180,7 @@ export class SyncEngine {
     const remoteTree = await this.decryptBookmarks(remote.bookmarks, info.passwordHash);
     const cached = await this.store.getCachedBookmarks();
     const base = cached ? deserializeBookmarks(cached) : [];
-    const local = await this.provider.getBookmarks();
+    const local = await this.localBookmarks();
 
     const merged = threeWayMerge(base, local, remoteTree);
     await this.applyRemote(merged);
@@ -225,12 +231,15 @@ export class SyncEngine {
    * for an un-pushed local edit. Callers must serialise this against other sync work.
    */
   async restore(bookmarks: Bookmark[]): Promise<void> {
+    // Restored trees usually come from a backup file, so validate here too rather than
+    // trusting the caller to have done it.
+    const restored = acceptBookmarkTree(bookmarks);
     if (await this.store.isSyncEnabled()) {
       // applyRemote refreshes the cache; push then uploads the restored tree.
-      await this.applyRemote(bookmarks);
+      await this.applyRemote(restored);
       await this.push();
     } else {
-      await this.provider.setBookmarks(bookmarks);
+      await this.provider.setBookmarks(restored);
     }
   }
 
@@ -243,7 +252,7 @@ export class SyncEngine {
     if (cached === undefined) {
       return false;
     }
-    const current = canonicalizeBookmarks(await this.provider.getBookmarks());
+    const current = canonicalizeBookmarks(await this.localBookmarks());
     return current !== cached;
   }
 
@@ -275,6 +284,18 @@ export class SyncEngine {
     return { api: this.createApi(info.serviceUrl), info };
   }
 
+  /**
+   * The browser's current bookmarks, validated and stripped of unsafe-URL nodes.
+   *
+   * Every read of the local tree goes through here so the same policy applies to both
+   * sides of a comparison. Sanitising only the remote tree would leave local and cached
+   * permanently unequal, and {@link isDirty} compares them — the tree would look edited
+   * on every check and sync in a loop.
+   */
+  private async localBookmarks(): Promise<Bookmark[]> {
+    return acceptBookmarkTree(await this.provider.getBookmarks());
+  }
+
   /** Encrypts and uploads the browser's current bookmarks, updating the cache. */
   private async uploadLocal(
     api: ApiClient,
@@ -283,7 +304,7 @@ export class SyncEngine {
     lastUpdated: string | undefined,
     version?: string,
   ): Promise<string> {
-    const local = assignIds(await this.provider.getBookmarks());
+    const local = assignIds(await this.localBookmarks());
     const encrypted = await encryptData(serializeBookmarks(local), passwordHash);
     const newLastUpdated = await api.updateSync(syncId, encrypted, lastUpdated, version);
     await this.store.setCachedBookmarks(canonicalizeBookmarks(local));
@@ -303,7 +324,9 @@ export class SyncEngine {
     } catch {
       throw new InvalidCredentialsError();
     }
-    return json ? deserializeBookmarks(json) : [];
+    // Validation failures stay outside the catch above: a malformed tree is not a wrong
+    // password, and reporting it as one would send users chasing their credentials.
+    return json ? sanitizeBookmarkTree(deserializeBookmarks(json)) : [];
   }
 
   private async persist(info: SyncInfo, version: string, lastUpdated: string): Promise<void> {
