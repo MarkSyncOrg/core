@@ -127,6 +127,22 @@ export function validateBookmarkTree(value: unknown): Bookmark[] {
   return value as Bookmark[];
 }
 
+/** A node sanitisation took out of a tree, with enough context to report or replace it. */
+export interface RemovedBookmark {
+  /** The removed node, subtree intact. Not a copy — it is the node from the source tree. */
+  bookmark: Bookmark;
+  /** Titles of the folders that contained it, outermost first; empty at the top level. */
+  path: readonly string[];
+  /** The index it occupied among its parent's children in the source tree. */
+  index: number;
+}
+
+/** A sanitised tree together with everything sanitisation dropped from it. */
+export interface SanitizeResult {
+  bookmarks: Bookmark[];
+  removed: RemovedBookmark[];
+}
+
 /**
  * Returns a copy of the tree with unsafe-URL nodes removed (with their subtrees).
  *
@@ -138,21 +154,103 @@ export function validateBookmarkTree(value: unknown): Bookmark[] {
  * on that depth cap.
  */
 export function sanitizeBookmarkTree(bookmarks: Bookmark[]): Bookmark[] {
-  const result: Bookmark[] = [];
-  for (const node of bookmarks) {
-    if (!isSafeBookmarkUrl(node.url)) {
-      continue;
-    }
+  return sanitizeBookmarkTreeWithReport(bookmarks).bookmarks;
+}
+
+/**
+ * {@link sanitizeBookmarkTree}, but also returning what was dropped.
+ *
+ * The removals are not recoverable from the sanitised tree, so anything that needs to
+ * tell the user ("12 entries were skipped") or to keep the nodes — see
+ * {@link reinstateRemovedBookmarks} — has to read them here.
+ *
+ * Removals are reported in document order, and within one parent in ascending index
+ * order, which is what makes the indices usable for re-insertion.
+ */
+export function sanitizeBookmarkTreeWithReport(bookmarks: Bookmark[]): SanitizeResult {
+  const removed: RemovedBookmark[] = [];
+
+  const walk = (nodes: Bookmark[], path: readonly string[]): Bookmark[] => {
+    const result: Bookmark[] = [];
+    nodes.forEach((node, index) => {
+      if (!isSafeBookmarkUrl(node.url)) {
+        removed.push({ bookmark: node, path, index });
+        return;
+      }
+      const copy: Bookmark = { ...node };
+      if (node.children) {
+        copy.children = walk(node.children, [...path, node.title ?? '']);
+      }
+      result.push(copy);
+    });
+    return result;
+  };
+
+  return { bookmarks: walk(bookmarks, []), removed };
+}
+
+/** Copies a tree deeply enough that its arrays can be spliced without touching the input. */
+function copyTree(bookmarks: Bookmark[]): Bookmark[] {
+  return bookmarks.map((node) => {
     const copy: Bookmark = { ...node };
     if (node.children) {
-      copy.children = sanitizeBookmarkTree(node.children);
+      copy.children = copyTree(node.children);
     }
-    result.push(copy);
+    return copy;
+  });
+}
+
+/**
+ * Puts nodes reported by {@link sanitizeBookmarkTreeWithReport} back into a tree.
+ *
+ * This exists because writing a sanitised tree over the browser's bookmarks is
+ * destructive: the write would delete the user's own `javascript:` bookmarklets, which
+ * are excluded from the sync but are not the sync's to remove. Sanitising a tree, sending
+ * it somewhere, and reinstating the removals on the way back keeps the exclusion without
+ * turning it into a deletion.
+ *
+ * Placement is best-effort, because the tree being written to is not the tree the nodes
+ * came out of: each node goes back into the folder whose title path it was under, at the
+ * index it held. If a folder along that path no longer exists, the node lands at the end
+ * of the deepest folder that does — data is kept even when its surroundings have changed.
+ *
+ * Returns a new tree; the input is not modified.
+ */
+export function reinstateRemovedBookmarks(
+  bookmarks: Bookmark[],
+  removed: readonly RemovedBookmark[],
+): Bookmark[] {
+  if (removed.length === 0) {
+    return bookmarks;
   }
+  const result = copyTree(bookmarks);
+
+  for (const { bookmark, path, index } of removed) {
+    let siblings = result;
+    let exact = true;
+    for (const title of path) {
+      // Only a folder can hold children; a leaf that happens to share the title is not
+      // the folder we are looking for.
+      const folder = siblings.find((node) => node.title === title && node.url === undefined);
+      if (!folder) {
+        exact = false;
+        break;
+      }
+      folder.children ??= [];
+      siblings = folder.children;
+    }
+    siblings.splice(exact ? Math.min(index, siblings.length) : siblings.length, 0, bookmark);
+  }
+
   return result;
 }
 
 /** Validates then sanitises an untrusted tree — the standard trust-boundary entry point. */
 export function acceptBookmarkTree(value: unknown): Bookmark[] {
   return sanitizeBookmarkTree(validateBookmarkTree(value));
+}
+
+/** {@link acceptBookmarkTree}, but also returning what sanitisation dropped. */
+export function acceptBookmarkTreeWithReport(value: unknown): SanitizeResult {
+  return sanitizeBookmarkTreeWithReport(validateBookmarkTree(value));
 }

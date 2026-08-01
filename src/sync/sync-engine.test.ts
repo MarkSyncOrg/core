@@ -3,8 +3,10 @@ import {
   assignIds,
   type Bookmark,
   BookmarkContainer,
+  canonicalizeBookmarks,
   deserializeBookmarks,
   serializeBookmarks,
+  stripIds,
 } from '../bookmarks/bookmark';
 import { encryptData, getPasswordHash } from '../crypto/crypto';
 import { InvalidCredentialsError, SyncConflictError, SyncNotEnabledError } from '../errors';
@@ -506,5 +508,161 @@ describe('SyncEngine.forcePull / forcePush', () => {
     const { engine } = buildEngine(fakeApi());
     await expect(engine.forcePull()).rejects.toBeInstanceOf(SyncNotEnabledError);
     await expect(engine.forcePush()).rejects.toBeInstanceOf(SyncNotEnabledError);
+  });
+});
+
+// Regression tests for issue #3: a bookmarklet is excluded from the sync, which is not
+// the same as being deleted from the browser. Applying a remote tree is a destructive
+// full-tree write, so it has to put back what it filtered out on the way up.
+describe('SyncEngine local bookmarklets', () => {
+  const BOOKMARKLET = 'javascript:void(0)';
+
+  /** Local tree with a bookmarklet sitting between two ordinary bookmarks. */
+  const localWithBookmarklet: Bookmark[] = [
+    {
+      title: BookmarkContainer.Toolbar,
+      children: [
+        { title: 'X', url: 'https://x.org' },
+        { title: 'Let', url: BOOKMARKLET },
+      ],
+    },
+  ];
+
+  async function enabledEngine(api: ApiClient) {
+    const built = buildEngine(api);
+    await built.store.setSyncInfo({
+      serviceUrl: SERVICE_URL,
+      syncId: SYNC_ID,
+      passwordHash: await getPasswordHash('pw', SYNC_ID),
+    });
+    await built.store.setSyncEnabled(true);
+    await built.store.setLastUpdated('T1');
+    return built;
+  }
+
+  async function encryptedTree(bookmarks: Bookmark[]): Promise<string> {
+    return encryptData(serializeBookmarks(bookmarks), await getPasswordHash('pw', SYNC_ID));
+  }
+
+  it('keeps a local bookmarklet when a pull overwrites the tree', async () => {
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: await encryptedTree(sampleBookmarks),
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+    });
+    const { provider, engine } = await enabledEngine(api);
+    provider.bookmarks = structuredClone(localWithBookmarklet);
+
+    expect(await engine.pull()).toBe(true);
+
+    expect(provider.bookmarks).toEqual(localWithBookmarklet);
+  });
+
+  it('keeps it out of the upload but in the browser across enable + force pull', async () => {
+    // The reproduction from the issue: enable a new sync, then pull the tree back down.
+    const uploaded: string[] = [];
+    const api = fakeApi({
+      updateSync: vi.fn(async (_syncId: string, bookmarks: string) => {
+        uploaded.push(bookmarks);
+        return 'T1';
+      }),
+      getSync: vi.fn(async () => ({
+        bookmarks: uploaded[uploaded.length - 1] ?? '',
+        version: APP_VERSION,
+        lastUpdated: 'T1',
+      })),
+    });
+
+    const { provider, engine } = buildEngine(api);
+    provider.bookmarks = structuredClone(localWithBookmarklet);
+
+    await engine.enableNewSync(SERVICE_URL, 'pw');
+    await engine.forcePull();
+
+    // IDs are assigned on upload, so compare the shape rather than the exact nodes.
+    expect(stripIds(provider.bookmarks)).toEqual(localWithBookmarklet);
+    // The service never saw it.
+    const hash = await getPasswordHash('pw', SYNC_ID);
+    const { decryptData } = await import('../crypto/crypto');
+    const sent = deserializeBookmarks(await decryptData(uploaded[0]!, hash));
+    expect(JSON.stringify(sent)).not.toContain('javascript:');
+  });
+
+  it('does not report the preserved bookmarklet as a local edit', async () => {
+    // The cache holds the sanitised tree, so dirty detection still compares like with
+    // like — otherwise the engine would push in a loop.
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: await encryptedTree(sampleBookmarks),
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+    });
+    const { engine, provider } = await enabledEngine(api);
+    provider.bookmarks = structuredClone(localWithBookmarklet);
+
+    await engine.pull();
+
+    expect(await engine.isDirty()).toBe(false);
+  });
+
+  it('keeps it through a three-way merge', async () => {
+    const remoteTree: Bookmark[] = [
+      {
+        title: BookmarkContainer.Toolbar,
+        children: [
+          { title: 'X', url: 'https://x.org' },
+          { title: 'Remote', url: 'https://remote.org' },
+        ],
+      },
+    ];
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: await encryptedTree(remoteTree),
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+      updateSync: vi.fn(async () => 'T3'),
+    });
+    const { store, provider, engine } = await enabledEngine(api);
+    // Base: just X. Locally the user added Local (and keeps a bookmarklet), remotely
+    // someone added Remote — both sides changed, so this goes down the merge path.
+    await store.setCachedBookmarks(
+      canonicalizeBookmarks([
+        { title: BookmarkContainer.Toolbar, children: [{ title: 'X', url: 'https://x.org' }] },
+      ]),
+    );
+    provider.bookmarks = [
+      {
+        title: BookmarkContainer.Toolbar,
+        children: [
+          { title: 'X', url: 'https://x.org' },
+          { title: 'Let', url: BOOKMARKLET },
+          { title: 'Local', url: 'https://local.org' },
+        ],
+      },
+    ];
+
+    expect(await engine.sync()).toBe('merged');
+
+    const urls = provider.bookmarks[0]!.children!.map((node) => node.url);
+    expect(urls).toContain(BOOKMARKLET);
+    expect(urls).toContain('https://remote.org');
+    expect(urls).toContain('https://local.org');
+  });
+
+  it('replaces it on restore, which is an explicit whole-tree replacement', async () => {
+    const api = fakeApi();
+    const { provider, engine } = buildEngine(api);
+    provider.bookmarks = structuredClone(localWithBookmarklet);
+
+    await engine.restore(sampleBookmarks);
+
+    expect(provider.bookmarks).toEqual(sampleBookmarks);
   });
 });

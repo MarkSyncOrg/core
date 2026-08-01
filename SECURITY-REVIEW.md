@@ -314,6 +314,14 @@ Two consequences worth recording:
   bookmarklets. The engine filters before anything is uploaded or compared, and
   `isSafeBookmarkUrl` is exported as the render-time guard. This contract is now stated
   in their doc comments and in SECURITY.md.
+- **Filtering must not become deletion** (issue #3, fixed after this review).
+  `provider.setBookmarks` is a destructive full-tree write, so applying a sanitised
+  remote tree over the local one erased bookmarklets the sync had merely excluded.
+  `sanitizeBookmarkTreeWithReport` now reports what it dropped and
+  `reinstateRemovedBookmarks` puts those nodes back before the write, while the cache
+  keeps holding the sanitised tree so dirty detection still compares like with like. The
+  nodes are still never uploaded, and a restore — an explicit whole-tree replacement —
+  still replaces them.
 
 **Finding 4.** `normalizeServiceUrl` parses the URL, requires `https` (allowing `http`
 only for loopback, so self-hosting still works), and rejects embedded credentials and
