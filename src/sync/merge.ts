@@ -4,10 +4,11 @@
 // device's current tree (`local`) and the server's current tree (`remote`), it produces
 // a single merged tree that incorporates both sides' changes.
 //
-// Identity is content-based, scoped to a sibling list: folders are matched by title,
-// bookmarks by URL, separators by position. Duplicate keys within one folder are matched
-// by occurrence order. This needs no stable IDs (the sync format reassigns them on every
-// upload) and no native↔synced ID mapping.
+// Identity is content-based and comes from ../bookmarks/identity.js, which the metadata
+// sidecar keys off too: folders are matched by title, bookmarks by URL, separators by
+// position, with duplicates inside one folder matched by occurrence order. This needs no
+// stable IDs (the sync format reassigns them on every upload) and no native↔synced ID
+// mapping.
 //
 // Conflict rules (deterministic, so every device converges on the same result):
 //   - attribute edited on one side only  → take that side's value
@@ -25,6 +26,7 @@ import {
   SEPARATOR_URL,
   stripIds,
 } from '../bookmarks/bookmark.js';
+import { type KeyedBookmark, keyBookmarkSiblings } from '../bookmarks/identity.js';
 
 /**
  * Merges `local` and `remote` against their common ancestor `base`, returning a single
@@ -41,39 +43,7 @@ export function threeWayMerge(
   return cleanAllBookmarks(stripIds(merged));
 }
 
-interface Keyed {
-  key: string;
-  node: Bookmark;
-}
-
-/** The match key for a node, ignoring per-occurrence disambiguation. */
-function baseKey(node: Bookmark): string {
-  switch (getBookmarkType(node)) {
-    case BookmarkType.Separator:
-      return 'sep';
-    case BookmarkType.Folder:
-    case BookmarkType.Container:
-      return `f:${node.title ?? ''}`;
-    default:
-      return `b:${node.url ?? ''}`;
-  }
-}
-
-/**
- * Keys a sibling list, disambiguating repeats by occurrence so duplicate titles/URLs in
- * the same folder match by position across base/local/remote.
- */
-function keyed(nodes: Bookmark[]): Keyed[] {
-  const counts = new Map<string, number>();
-  return nodes.map((node) => {
-    const bk = baseKey(node);
-    const n = counts.get(bk) ?? 0;
-    counts.set(bk, n + 1);
-    return { key: `${bk}#${n}`, node };
-  });
-}
-
-function toMap(keys: Keyed[]): Map<string, Bookmark> {
+function toMap(keys: KeyedBookmark[]): Map<string, Bookmark> {
   return new Map(keys.map(({ key, node }) => [key, node]));
 }
 
@@ -84,9 +54,9 @@ function sameSubtree(a: Bookmark, b: Bookmark): boolean {
 
 /** Merges one sibling list. */
 function mergeLevel(base: Bookmark[], local: Bookmark[], remote: Bookmark[]): Bookmark[] {
-  const localKeyed = keyed(local);
-  const remoteKeyed = keyed(remote);
-  const baseMap = toMap(keyed(base));
+  const localKeyed = keyBookmarkSiblings(local);
+  const remoteKeyed = keyBookmarkSiblings(remote);
+  const baseMap = toMap(keyBookmarkSiblings(base));
   const localMap = toMap(localKeyed);
   const remoteMap = toMap(remoteKeyed);
 
@@ -104,7 +74,7 @@ function mergeLevel(base: Bookmark[], local: Bookmark[], remote: Bookmark[]): Bo
  * Produces the merged child order: remote order as the spine, with local-only keys woven
  * in at their local position. Every key from either side appears exactly once.
  */
-function mergeOrder(localKeyed: Keyed[], remoteKeyed: Keyed[]): string[] {
+function mergeOrder(localKeyed: KeyedBookmark[], remoteKeyed: KeyedBookmark[]): string[] {
   const remoteKeys = remoteKeyed.map((k) => k.key);
   const remoteSet = new Set(remoteKeys);
   const emitted = new Set<string>();

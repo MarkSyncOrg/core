@@ -31,6 +31,29 @@ export {
   deserializeBookmarks,
 } from './bookmarks/bookmark.js';
 
+// Bookmark identity (content-based node matching, shared by the merge and the sidecar)
+export { type KeyedBookmark, bookmarkMatchKey, keyBookmarkSiblings } from './bookmarks/identity.js';
+
+// Bookmark metadata sidecar (description/tags, which no browser stores natively)
+export {
+  MAX_TAGS,
+  TAG_MAX_LENGTH,
+  type BookmarkMetadata,
+  type BookmarkMetadataMap,
+  type StoredBookmarkMetadata,
+  bookmarkMetadataKey,
+  bookmarkMetadataPath,
+  bookmarkMetadataKeysForUrl,
+  collectBookmarkMetadata,
+  captureBookmarkMetadata,
+  applyBookmarkMetadata,
+  setBookmarkMetadata,
+  normalizeTags,
+  normalizeDescription,
+  parseTags,
+  formatTags,
+} from './bookmarks/metadata.js';
+
 // Bookmark validation / sanitisation (trust-boundary helpers).
 // `isSafeBookmarkUrl` is also the render-time guard consumers should use before turning
 // a bookmark into an <a href> or navigating to it.
@@ -75,6 +98,7 @@ export { Mutex } from './sync/mutex.js';
 
 // Storage port
 export { type StorageArea, MemoryStorageArea } from './storage/storage-area.js';
+export { BookmarkMetadataStore } from './storage/bookmark-metadata-store.js';
 export {
   SyncStore,
   DEFAULT_SETTINGS,
