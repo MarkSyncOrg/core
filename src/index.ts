@@ -81,6 +81,7 @@ export {
   type SyncInfo,
   type BookmarkIdMapping,
   type Settings,
+  type SyncDirection,
   type Theme,
 } from './storage/sync-store.js';
 
@@ -120,5 +121,6 @@ export {
   UnexpectedResponseError,
   InvalidCredentialsError,
   SyncNotEnabledError,
+  SyncDirectionError,
   InvalidBookmarkDataError,
 } from './errors.js';

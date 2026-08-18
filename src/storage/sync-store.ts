@@ -35,6 +35,20 @@ const SETTINGS_KEY = 'settings';
 /** How the popup is themed. */
 export type Theme = 'system' | 'light' | 'dark';
 
+/**
+ * Which way this device lets bookmarks flow.
+ *
+ * - `two-way` — the default: push, pull and three-way merge as needed.
+ * - `push-only` — the device is a source. It uploads its own tree and never applies the
+ *   service's, so nothing another browser does can reach its bookmarks.
+ * - `pull-only` — the device is a mirror. It applies the service's tree and never
+ *   uploads, so nothing it does locally can reach the sync.
+ *
+ * A one-way sync is the pair: `push-only` on the browser that owns the bookmarks,
+ * `pull-only` on every browser that should only receive them.
+ */
+export type SyncDirection = 'two-way' | 'push-only' | 'pull-only';
+
 /** User-configurable options (ported from the legacy client's settings). */
 export interface Settings {
   /** Popup colour theme. */
@@ -45,6 +59,8 @@ export interface Settings {
   syncBookmarksToolbar: boolean;
   /** Push local bookmark edits automatically when they happen. */
   syncOnChange: boolean;
+  /** Which way bookmarks are allowed to flow on this device. */
+  syncDirection: SyncDirection;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -52,6 +68,7 @@ export const DEFAULT_SETTINGS: Settings = {
   syncIntervalMinutes: 15,
   syncBookmarksToolbar: true,
   syncOnChange: true,
+  syncDirection: 'two-way',
 };
 
 /**

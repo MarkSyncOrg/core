@@ -9,11 +9,16 @@ import {
   stripIds,
 } from '../bookmarks/bookmark';
 import { encryptData, getPasswordHash } from '../crypto/crypto';
-import { InvalidCredentialsError, SyncConflictError, SyncNotEnabledError } from '../errors';
+import {
+  InvalidCredentialsError,
+  SyncConflictError,
+  SyncDirectionError,
+  SyncNotEnabledError,
+} from '../errors';
 import { MemoryStorageArea } from '../storage/storage-area';
-import { SyncStore } from '../storage/sync-store';
+import { type SyncDirection, SyncStore } from '../storage/sync-store';
 import type { BookmarkProvider } from './bookmark-provider';
-import { type ApiClient, SyncEngine } from './sync-engine';
+import { type ApiClient, SyncEngine, type SyncOutcome } from './sync-engine';
 
 const APP_VERSION = '1.1.13';
 const SERVICE_URL = 'https://api.example.org';
@@ -396,6 +401,7 @@ describe('SyncEngine status and disable', () => {
       serviceUrl: SERVICE_URL,
       syncId: SYNC_ID,
       lastUpdated: 'T1',
+      direction: 'two-way',
     });
   });
 
@@ -406,6 +412,8 @@ describe('SyncEngine status and disable', () => {
       serviceUrl: undefined,
       syncId: undefined,
       lastUpdated: undefined,
+      // Settings survive a disable, so the direction is still the configured one.
+      direction: 'two-way',
     });
   });
 });
@@ -664,5 +672,400 @@ describe('SyncEngine local bookmarklets', () => {
     await engine.restore(sampleBookmarks);
 
     expect(provider.bookmarks).toEqual(sampleBookmarks);
+  });
+});
+
+describe('SyncEngine one-way sync direction', () => {
+  const remoteTree: Bookmark[] = [
+    { title: BookmarkContainer.Toolbar, children: [{ title: 'R', url: 'https://r.org' }] },
+  ];
+
+  async function enabledEngine(api: ApiClient, direction: SyncDirection) {
+    const built = buildEngine(api);
+    await built.store.setSyncInfo({
+      serviceUrl: SERVICE_URL,
+      syncId: SYNC_ID,
+      passwordHash: await getPasswordHash('pw', SYNC_ID),
+    });
+    await built.store.setSyncEnabled(true);
+    await built.store.setLastUpdated('T1');
+    await built.store.setSettings({ syncDirection: direction });
+    built.provider.bookmarks = structuredClone(sampleBookmarks);
+    await built.store.setCachedBookmarks(canonicalizeBookmarks(sampleBookmarks));
+    return built;
+  }
+
+  /** An API whose sync holds `remoteTree` at timestamp `T2`. */
+  async function changedRemoteApi(overrides: Partial<ApiClient> = {}): Promise<ApiClient> {
+    const hash = await getPasswordHash('pw', SYNC_ID);
+    const encrypted = await encryptData(serializeBookmarks(remoteTree), hash);
+    return fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: encrypted,
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+      ...overrides,
+    });
+  }
+
+  describe('push-only', () => {
+    it('uploads local edits over a remote that also changed', async () => {
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+      const local = structuredClone(provider.bookmarks);
+
+      expect(await engine.sync()).toBe('pushed');
+
+      // The remote tree never reaches the browser, and the upload is made against the
+      // service's current timestamp so it wins instead of conflicting.
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(provider.bookmarks).toEqual(local);
+      expect((api.updateSync as ReturnType<typeof vi.fn>).mock.calls[0]![2]).toBe('T2');
+      expect(await store.getLastUpdated()).toBe('T3');
+    });
+
+    it('leaves a remote change alone without pretending to have applied it', async () => {
+      const api = await changedRemoteApi();
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+
+      expect(await engine.sync()).toBe('skipped');
+
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(provider.bookmarks).toEqual(sampleBookmarks);
+      expect(api.updateSync).not.toHaveBeenCalled();
+      // The stored timestamp stays behind the service's: advancing it would record a
+      // revision this device never took, and the next sync would report `idle`.
+      expect(await store.getLastUpdated()).toBe('T1');
+    });
+
+    it('pushes a local edit over a service that moved on, without conflicting', async () => {
+      // The stored timestamp is stale by design after a skip, so `push` uploads against
+      // the service's current one — this device cannot resolve a conflict by pulling.
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+
+      await engine.push();
+
+      expect((api.updateSync as ReturnType<typeof vi.fn>).mock.calls[0]![2]).toBe('T2');
+      expect(await store.getLastUpdated()).toBe('T3');
+    });
+
+    it('is idle when neither side changed', async () => {
+      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
+      const { engine, provider } = await enabledEngine(api, 'push-only');
+
+      expect(await engine.sync()).toBe('idle');
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(api.updateSync).not.toHaveBeenCalled();
+    });
+
+    it('refuses to pull', async () => {
+      const api = await changedRemoteApi();
+      const { engine, provider } = await enabledEngine(api, 'push-only');
+
+      await expect(engine.pull()).rejects.toBeInstanceOf(SyncDirectionError);
+      await expect(engine.forcePull()).rejects.toBeInstanceOf(SyncDirectionError);
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+    });
+
+    it('still allows an explicit force push', async () => {
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { engine } = await enabledEngine(api, 'push-only');
+
+      await engine.forcePush();
+      expect(api.updateSync).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('pull-only', () => {
+    it('applies remote changes even when there are local edits', async () => {
+      const api = await changedRemoteApi();
+      const { store, provider, engine } = await enabledEngine(api, 'pull-only');
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+
+      expect(await engine.sync()).toBe('pulled');
+
+      // No merge: the local edit is discarded rather than fed back into the sync.
+      expect(provider.bookmarks).toEqual(deserializeBookmarks(serializeBookmarks(remoteTree)));
+      expect(api.updateSync).not.toHaveBeenCalled();
+      expect(await store.getLastUpdated()).toBe('T2');
+    });
+
+    it('reverts local edits when the remote has not changed', async () => {
+      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
+      const { engine, provider } = await enabledEngine(api, 'pull-only');
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+
+      expect(await engine.sync()).toBe('reverted');
+
+      expect(provider.bookmarks).toEqual(deserializeBookmarks(serializeBookmarks(sampleBookmarks)));
+      expect(api.updateSync).not.toHaveBeenCalled();
+      expect(await engine.isDirty()).toBe(false);
+    });
+
+    it('is idle when neither side changed', async () => {
+      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
+      const { engine, provider } = await enabledEngine(api, 'pull-only');
+
+      expect(await engine.sync()).toBe('idle');
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(api.updateSync).not.toHaveBeenCalled();
+    });
+
+    it('refuses to push', async () => {
+      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
+      const { engine } = await enabledEngine(api, 'pull-only');
+
+      await expect(engine.push()).rejects.toBeInstanceOf(SyncDirectionError);
+      await expect(engine.forcePush()).rejects.toBeInstanceOf(SyncDirectionError);
+      expect(api.updateSync).not.toHaveBeenCalled();
+    });
+
+    it('restores a backup locally without uploading it', async () => {
+      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
+      const { engine, provider } = await enabledEngine(api, 'pull-only');
+
+      await engine.restore(remoteTree);
+
+      expect(provider.bookmarks).toEqual(remoteTree);
+      expect(api.updateSync).not.toHaveBeenCalled();
+      // Cached with the restored tree, so the next sync does not read it as drift.
+      expect(await engine.isDirty()).toBe(false);
+    });
+  });
+
+  describe('joining an existing sync', () => {
+    /** A store/provider pair with a direction set but no sync enabled yet. */
+    async function pendingEngine(api: ApiClient, direction: SyncDirection) {
+      const built = buildEngine(api);
+      await built.store.setSettings({ syncDirection: direction });
+      built.provider.bookmarks = structuredClone(sampleBookmarks);
+      return built;
+    }
+
+    it('uploads instead of applying when the device only sends', async () => {
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await pendingEngine(api, 'push-only');
+
+      await engine.enableExistingSync(SERVICE_URL, SYNC_ID, 'pw');
+
+      // The remote tree never lands in the browser — joining is not an exception to
+      // "this device never receives".
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(provider.bookmarks).toEqual(sampleBookmarks);
+      // ...and the service is left holding this device's tree instead.
+      const [, , against] = (api.updateSync as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(against).toBe('T2');
+      expect(await store.getLastUpdated()).toBe('T3');
+      expect(await store.isSyncEnabled()).toBe(true);
+      expect(await engine.isDirty()).toBe(false);
+    });
+
+    it('still rejects a wrong password before uploading anything', async () => {
+      // Credentials are proven by decrypting the existing payload. Skipping that check
+      // for a send-only device would re-encrypt the sync under a key nobody else holds.
+      const api = await changedRemoteApi();
+      const { store, engine } = await pendingEngine(api, 'push-only');
+
+      await expect(engine.enableExistingSync(SERVICE_URL, SYNC_ID, 'wrong')).rejects.toBeInstanceOf(
+        InvalidCredentialsError,
+      );
+      expect(api.updateSync).not.toHaveBeenCalled();
+      expect(await store.isSyncEnabled()).toBe(false);
+    });
+
+    it('applies the remote tree when the device only receives', async () => {
+      const api = await changedRemoteApi();
+      const { store, provider, engine } = await pendingEngine(api, 'pull-only');
+
+      await engine.enableExistingSync(SERVICE_URL, SYNC_ID, 'pw');
+
+      expect(provider.bookmarks).toEqual(deserializeBookmarks(serializeBookmarks(remoteTree)));
+      expect(api.updateSync).not.toHaveBeenCalled();
+      expect(await store.getLastUpdated()).toBe('T2');
+    });
+
+    it('seeds a new sync from local bookmarks whatever the direction', async () => {
+      // A new sync has to come from somewhere, so this upload happens even on a
+      // receive-only device; it is the last thing that device ever sends.
+      const api = fakeApi({ updateSync: vi.fn(async () => 'T1') });
+      const { store, provider, engine } = await pendingEngine(api, 'pull-only');
+
+      await engine.enableNewSync(SERVICE_URL, 'pw');
+
+      expect(api.updateSync).toHaveBeenCalledOnce();
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(await store.isSyncEnabled()).toBe(true);
+    });
+  });
+
+  describe('changing direction afterwards', () => {
+    /**
+     * Every ordered pair of directions, under every way the two sides can have diverged.
+     * The device syncs once under the direction it was set up with, the user then changes
+     * their mind in the settings, and it syncs again — the case that is easy to get wrong,
+     * because the second run inherits whatever bookkeeping the first one left behind.
+     *
+     * `local` lists the bookmark titles left in the browser: `X` is what this device
+     * started with, `R` what the service had, `L` an edit made here.
+     */
+    interface Divergence {
+      readonly what: string;
+      readonly remoteMoved: boolean;
+      readonly localEdited: boolean;
+      readonly expected: readonly {
+        readonly from: SyncDirection;
+        readonly to: SyncDirection;
+        readonly first: SyncOutcome;
+        readonly second: SyncOutcome;
+        readonly local: string;
+        readonly uploads: number;
+      }[];
+    }
+
+    const DIVERGENCES: readonly Divergence[] = [
+      {
+        what: 'the service moved on and this device has no edits of its own',
+        remoteMoved: true,
+        localEdited: false,
+        // Whatever the pair, the device ends up holding the service's tree: a send-only
+        // device that skipped it picks it up on the switch, which is the whole point of
+        // not recording a revision it declined to apply.
+        expected: [
+          { from: 'two-way', to: 'push-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'two-way', to: 'pull-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'push-only', to: 'two-way', first: 'skipped', second: 'pulled', local: 'R', uploads: 0 },
+          { from: 'push-only', to: 'pull-only', first: 'skipped', second: 'pulled', local: 'R', uploads: 0 },
+          { from: 'pull-only', to: 'two-way', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'pull-only', to: 'push-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+        ],
+      },
+      {
+        what: 'this device was edited and the service stood still',
+        remoteMoved: false,
+        localEdited: true,
+        // Only a receive-only device loses the edit, and it loses it on the *first* sync —
+        // switching afterwards cannot bring it back, which is why the setting is asked for
+        // at setup. Note the two-way/send-only rows: having already pushed the edit, the
+        // device keeps it after switching to receive-only rather than reverting it.
+        expected: [
+          { from: 'two-way', to: 'push-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'two-way', to: 'pull-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'push-only', to: 'two-way', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'push-only', to: 'pull-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'pull-only', to: 'two-way', first: 'reverted', second: 'idle', local: 'X', uploads: 0 },
+          { from: 'pull-only', to: 'push-only', first: 'reverted', second: 'idle', local: 'X', uploads: 0 },
+        ],
+      },
+      {
+        what: 'both sides changed',
+        remoteMoved: true,
+        localEdited: true,
+        // The one-way devices resolve it by their own rule and the losing side's edit is
+        // gone for good; only a two-way first run keeps both. Every pair still converges —
+        // the second run is `idle`, never a device stuck asking the service the same
+        // question for ever.
+        expected: [
+          { from: 'two-way', to: 'push-only', first: 'merged', second: 'idle', local: 'L+R', uploads: 1 },
+          { from: 'two-way', to: 'pull-only', first: 'merged', second: 'idle', local: 'L+R', uploads: 1 },
+          { from: 'push-only', to: 'two-way', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'push-only', to: 'pull-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'pull-only', to: 'two-way', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'pull-only', to: 'push-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+        ],
+      },
+    ];
+
+    /** The toolbar's bookmark titles, sorted — a compact description of the local tree. */
+    function localTitles(tree: Bookmark[]): string {
+      const toolbar = tree.find((node) => node.title === BookmarkContainer.Toolbar);
+      return (toolbar?.children ?? [])
+        .map((child) => child.title)
+        .sort()
+        .join('+');
+    }
+
+    async function syncThenSwitch(
+      from: SyncDirection,
+      to: SyncDirection,
+      remoteMoved: boolean,
+      localEdited: boolean,
+    ) {
+      const hash = await getPasswordHash('pw', SYNC_ID);
+      const payload = await encryptData(
+        serializeBookmarks(remoteMoved ? remoteTree : sampleBookmarks),
+        hash,
+      );
+      let uploads = 0;
+      const api = fakeApi({
+        getSync: vi.fn(async () => ({
+          bookmarks: payload,
+          version: APP_VERSION,
+          lastUpdated: remoteMoved ? 'T2' : 'T1',
+        })),
+        // Once this device has uploaded, the service's timestamp is the one it produced.
+        getLastUpdated: vi.fn(async () => (uploads > 0 ? `U${uploads}` : remoteMoved ? 'T2' : 'T1')),
+        updateSync: vi.fn(async () => `U${++uploads}`),
+      });
+      const { store, provider, engine } = await enabledEngine(api, from);
+      if (localEdited) {
+        provider.bookmarks[0]!.children!.push({ title: 'L', url: 'https://l.org' });
+      }
+
+      const first = await engine.sync();
+      await store.setSettings({ syncDirection: to });
+      const second = await engine.sync();
+      return { first, second, local: localTitles(provider.bookmarks), uploads };
+    }
+
+    for (const divergence of DIVERGENCES) {
+      describe(`when ${divergence.what}`, () => {
+        for (const row of divergence.expected) {
+          it(`goes ${row.first} then ${row.second} switching ${row.from} → ${row.to}`, async () => {
+            const result = await syncThenSwitch(
+              row.from,
+              row.to,
+              divergence.remoteMoved,
+              divergence.localEdited,
+            );
+            expect(result).toEqual({
+              first: row.first,
+              second: row.second,
+              local: row.local,
+              uploads: row.uploads,
+            });
+          });
+        }
+      });
+    }
+
+    it('keeps the merge base usable when a send-only device is switched mid-divergence', async () => {
+      // The matrix above records outcomes; this is the invariant underneath them. A
+      // send-only device must not advance its stored timestamp past a revision it never
+      // applied, or the switched device compares equal timestamps, reports `idle` and
+      // then overwrites a sync it has never read.
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+
+      expect(await engine.sync()).toBe('skipped');
+      expect(await store.getLastUpdated()).toBe('T1');
+
+      provider.bookmarks[0]!.children!.push({ title: 'L', url: 'https://l.org' });
+      await store.setSettings({ syncDirection: 'two-way' });
+
+      expect(await engine.sync()).toBe('merged');
+      const titles = provider.bookmarks[0]!.children!.map((child) => child.title);
+      expect(titles).toContain('L');
+      expect(titles).toContain('R');
+    });
+  });
+
+  it('reports the configured direction in the status', async () => {
+    const { engine } = await enabledEngine(fakeApi(), 'pull-only');
+    expect((await engine.getStatus()).direction).toBe('pull-only');
   });
 });

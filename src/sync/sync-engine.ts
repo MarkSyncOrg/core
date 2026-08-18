@@ -14,8 +14,13 @@ import {
   sanitizeBookmarkTree,
 } from '../bookmarks/validate.js';
 import { decryptData, encryptData, getPasswordHash } from '../crypto/crypto.js';
-import { InvalidCredentialsError, SyncNotEnabledError, SyncNotFoundError } from '../errors.js';
-import type { SyncInfo, SyncStore } from '../storage/sync-store.js';
+import {
+  InvalidCredentialsError,
+  SyncDirectionError,
+  SyncNotEnabledError,
+  SyncNotFoundError,
+} from '../errors.js';
+import type { SyncDirection, SyncInfo, SyncStore } from '../storage/sync-store.js';
 import type { BookmarkProvider } from './bookmark-provider.js';
 import { threeWayMerge } from './merge.js';
 
@@ -41,6 +46,8 @@ export interface SyncStatus {
   serviceUrl?: string;
   syncId?: string;
   lastUpdated?: string;
+  /** Which way this device lets bookmarks flow (from settings, not from the service). */
+  direction: SyncDirection;
 }
 
 /**
@@ -49,14 +56,26 @@ export interface SyncStatus {
  * - `pushed` — local edits uploaded (remote was unchanged)
  * - `pulled` — remote changes applied locally (no local edits)
  * - `merged` — both sides changed; a three-way merge was applied locally and uploaded
+ * - `skipped` — remote changed but this device is `push-only`, so nothing was applied
+ * - `reverted` — local edits on a `pull-only` device were undone from the last-synced tree
  */
-export type SyncOutcome = 'idle' | 'pushed' | 'pulled' | 'merged';
+export type SyncOutcome = 'idle' | 'pushed' | 'pulled' | 'merged' | 'skipped' | 'reverted';
 
 /**
  * Orchestrates bookmark synchronisation between the browser and an xBrowserSync
  * service. Uses full-tree push/pull: the entire bookmark tree is encrypted and
  * uploaded, or downloaded and applied. Change detection uses the `lastUpdated`
  * timestamp; a server-side change during push surfaces as a SyncConflictError.
+ *
+ * The `syncDirection` setting narrows which of those halves the device performs. A
+ * `push-only` device never applies the service's tree, and a `pull-only` one never
+ * uploads its own; the guards live here rather than in the callers so the direction
+ * holds for background sync, bookmark-change pushes and the recovery actions alike.
+ * Enabling a sync is the one place the direction shapes the operation instead of
+ * forbidding it: `enableNewSync` always uploads, because a new sync has to be seeded from
+ * something, while `enableExistingSync` uploads rather than applies on a `push-only`
+ * device, so joining a sync cannot become the single overwrite the setting exists to
+ * prevent.
  */
 export class SyncEngine {
   private readonly store: SyncStore;
@@ -101,6 +120,13 @@ export class SyncEngine {
   /**
    * Enables sync against an existing sync ID, downloading and applying its bookmarks.
    * Throws InvalidCredentialsError if the password cannot decrypt the data.
+   *
+   * A `push-only` device joins the other way round: it uploads its own tree instead of
+   * applying the service's, because a device that is never allowed to receive must not
+   * receive on the way in either — that first apply would be the one overwrite the
+   * setting exists to prevent. The payload is still downloaded and decrypted first,
+   * since that is what proves the password is right: joining with a wrong one and then
+   * uploading would re-encrypt the sync under a key nobody else can read.
    */
   async enableExistingSync(serviceUrl: string, syncId: string, password: string): Promise<void> {
     if (!isValidSyncId(syncId)) {
@@ -115,6 +141,12 @@ export class SyncEngine {
     const remote = await api.getSync(syncId);
     const bookmarks = await this.decryptBookmarks(remote.bookmarks, passwordHash);
 
+    if ((await this.getDirection()) === 'push-only') {
+      const lastUpdated = await this.uploadLocal(api, syncId, passwordHash, remote.lastUpdated);
+      await this.persist({ serviceUrl, syncId, passwordHash }, remote.version, lastUpdated);
+      return;
+    }
+
     await this.applyRemote(bookmarks);
     await this.persist({ serviceUrl, syncId, passwordHash }, remote.version, remote.lastUpdated);
   }
@@ -125,6 +157,7 @@ export class SyncEngine {
    */
   async pull(): Promise<boolean> {
     const { api, info } = await this.requireSync();
+    await this.requireDirection('pull');
 
     const remoteLastUpdated = await api.getLastUpdated(info.syncId);
     const localLastUpdated = await this.store.getLastUpdated();
@@ -142,11 +175,19 @@ export class SyncEngine {
   /**
    * Pushes the browser's current bookmarks to the service. Throws SyncConflictError if
    * the remote sync changed since the last pull; the caller should pull and retry.
+   *
+   * A `push-only` device uploads against the service's current timestamp instead, so it
+   * never conflicts: it is the source, and pulling — the only way to resolve a conflict —
+   * is exactly what it is not allowed to do.
    */
   async push(): Promise<void> {
     const { api, info } = await this.requireSync();
+    await this.requireDirection('push');
 
-    const lastUpdated = await this.store.getLastUpdated();
+    const lastUpdated =
+      (await this.getDirection()) === 'push-only'
+        ? await api.getLastUpdated(info.syncId)
+        : await this.store.getLastUpdated();
     const newLastUpdated = await this.uploadLocal(api, info.syncId, info.passwordHash, lastUpdated);
     await this.store.setLastUpdated(newLastUpdated);
   }
@@ -167,6 +208,14 @@ export class SyncEngine {
     const localLastUpdated = await this.store.getLastUpdated();
     const remoteChanged = remoteLastUpdated !== localLastUpdated;
     const dirty = await this.isDirty();
+
+    const direction = await this.getDirection();
+    if (direction === 'push-only') {
+      return this.syncPushOnly(api, info, remoteLastUpdated, remoteChanged, dirty);
+    }
+    if (direction === 'pull-only') {
+      return this.syncPullOnly(api, info, remoteChanged, dirty);
+    }
 
     if (!remoteChanged) {
       if (!dirty) {
@@ -201,12 +250,83 @@ export class SyncEngine {
   }
 
   /**
+   * Reconciles a `push-only` device: this browser owns the bookmarks and never takes
+   * any from the service.
+   *
+   * When there are local edits they are uploaded against the service's *current*
+   * timestamp, so the upload always wins rather than raising a conflict the device is
+   * not allowed to resolve by pulling. When there are none, the remote change is simply
+   * left alone.
+   *
+   * Note what is deliberately *not* done: the stored timestamp is never advanced to a
+   * revision this device declined to apply. Doing so would leave the device believing it
+   * held the service's state while it did not, and the lie would outlive the setting —
+   * switched back to two-way, the device would report `idle` against a sync it has never
+   * seen, and its next push would silently overwrite it. Leaving the timestamp behind
+   * keeps `remoteChanged` true, so whatever direction it is switched to afterwards
+   * reconciles from the last state the two sides genuinely shared.
+   */
+  private async syncPushOnly(
+    api: ApiClient,
+    info: SyncInfo,
+    remoteLastUpdated: string,
+    remoteChanged: boolean,
+    dirty: boolean,
+  ): Promise<SyncOutcome> {
+    if (!dirty) {
+      return remoteChanged ? 'skipped' : 'idle';
+    }
+    const newLastUpdated = await this.uploadLocal(
+      api,
+      info.syncId,
+      info.passwordHash,
+      remoteLastUpdated,
+    );
+    await this.store.setLastUpdated(newLastUpdated);
+    return 'pushed';
+  }
+
+  /**
+   * Reconciles a `pull-only` device: this browser mirrors the service and never sends
+   * it anything.
+   *
+   * A remote change is applied unconditionally. Local edits cannot block it the way
+   * they do in two-way mode — they are never going to be uploaded, so merging them in
+   * would only feed this browser's own state back into a tree that is supposed to be a
+   * copy. For the same reason, local edits made while the remote sat still are undone
+   * from the last-synced tree: leaving them would let the mirror drift silently until
+   * the service happened to change again.
+   */
+  private async syncPullOnly(
+    api: ApiClient,
+    info: SyncInfo,
+    remoteChanged: boolean,
+    dirty: boolean,
+  ): Promise<SyncOutcome> {
+    if (remoteChanged) {
+      const remote = await api.getSync(info.syncId);
+      const bookmarks = await this.decryptBookmarks(remote.bookmarks, info.passwordHash);
+      await this.applyRemote(bookmarks);
+      await this.store.setLastUpdated(remote.lastUpdated);
+      return 'pulled';
+    }
+    const cached = dirty ? await this.store.getCachedBookmarks() : undefined;
+    if (cached === undefined) {
+      // `isDirty` is false without a cached tree, so this is the genuinely-idle case.
+      return 'idle';
+    }
+    await this.applyRemote(deserializeBookmarks(cached));
+    return 'reverted';
+  }
+
+  /**
    * Conflict recovery: discards local bookmarks and replaces them with the server's
    * current state, ignoring the change-detection short-circuit that {@link pull} uses.
    * Use when a device is stuck in conflict and the server copy is the source of truth.
    */
   async forcePull(): Promise<void> {
     const { api, info } = await this.requireSync();
+    await this.requireDirection('pull');
     const remote = await api.getSync(info.syncId);
     const bookmarks = await this.decryptBookmarks(remote.bookmarks, info.passwordHash);
     await this.applyRemote(bookmarks);
@@ -220,6 +340,7 @@ export class SyncEngine {
    */
   async forcePush(): Promise<void> {
     const { api, info } = await this.requireSync();
+    await this.requireDirection('push');
     const remoteLastUpdated = await api.getLastUpdated(info.syncId);
     const newLastUpdated = await this.uploadLocal(
       api,
@@ -240,6 +361,10 @@ export class SyncEngine {
    * carried over, because the user asked for these bookmarks and not the current ones.
    * Use `acceptBookmarkTreeWithReport` on the backup if you want to tell them what the
    * restored file itself lost to sanitisation.
+   *
+   * On a `pull-only` device the restore stays local: the tree is applied and cached, but
+   * not uploaded, since that device never sends anything to the service. It is a mirror
+   * again as soon as the service next changes.
    */
   async restore(bookmarks: Bookmark[]): Promise<void> {
     // Restored trees usually come from a backup file, so validate here too rather than
@@ -248,7 +373,9 @@ export class SyncEngine {
     if (await this.store.isSyncEnabled()) {
       // applyRemote refreshes the cache; push then uploads the restored tree.
       await this.applyRemote(restored, false);
-      await this.push();
+      if ((await this.getDirection()) !== 'pull-only') {
+        await this.push();
+      }
     } else {
       await this.provider.setBookmarks(restored);
     }
@@ -274,17 +401,42 @@ export class SyncEngine {
 
   /** Returns the current sync status for display. */
   async getStatus(): Promise<SyncStatus> {
-    const [info, enabled, lastUpdated] = await Promise.all([
+    const [info, enabled, lastUpdated, direction] = await Promise.all([
       this.store.getSyncInfo(),
       this.store.isSyncEnabled(),
       this.store.getLastUpdated(),
+      this.getDirection(),
     ]);
     return {
       enabled,
       serviceUrl: info?.serviceUrl,
       syncId: info?.syncId,
       lastUpdated,
+      direction,
     };
+  }
+
+  /** The configured direction for this device (defaults to two-way). */
+  private async getDirection(): Promise<SyncDirection> {
+    return (await this.store.getSettings()).syncDirection;
+  }
+
+  /**
+   * Throws unless this device is allowed to move bookmarks the given way. The message
+   * names the setting, because the only fix is for the user to change it.
+   */
+  private async requireDirection(way: 'push' | 'pull'): Promise<void> {
+    const direction = await this.getDirection();
+    if (way === 'push' && direction === 'pull-only') {
+      throw new SyncDirectionError(
+        'This device is set to receive changes only, so it cannot send bookmarks to the service',
+      );
+    }
+    if (way === 'pull' && direction === 'push-only') {
+      throw new SyncDirectionError(
+        'This device is set to send changes only, so it cannot apply bookmarks from the service',
+      );
+    }
   }
 
   private async requireSync(): Promise<{ api: ApiClient; info: SyncInfo }> {
