@@ -18,7 +18,7 @@ import {
 import { MemoryStorageArea } from '../storage/storage-area';
 import { type SyncDirection, SyncStore } from '../storage/sync-store';
 import type { BookmarkProvider } from './bookmark-provider';
-import { type ApiClient, SyncEngine } from './sync-engine';
+import { type ApiClient, SyncEngine, type SyncOutcome } from './sync-engine';
 
 const APP_VERSION = '1.1.13';
 const SERVICE_URL = 'https://api.example.org';
@@ -904,49 +904,163 @@ describe('SyncEngine one-way sync direction', () => {
   });
 
   describe('changing direction afterwards', () => {
-    it('pulls what it skipped once a send-only device is switched back to two-way', async () => {
-      // The case a user actually hits: set up one-way, change your mind in the settings.
-      // The device must reconcile from the last state both sides shared, not report
-      // `idle` against a sync whose current contents it has never seen.
-      const api = await changedRemoteApi();
-      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+    /**
+     * Every ordered pair of directions, under every way the two sides can have diverged.
+     * The device syncs once under the direction it was set up with, the user then changes
+     * their mind in the settings, and it syncs again — the case that is easy to get wrong,
+     * because the second run inherits whatever bookkeeping the first one left behind.
+     *
+     * `local` lists the bookmark titles left in the browser: `X` is what this device
+     * started with, `R` what the service had, `L` an edit made here.
+     */
+    interface Divergence {
+      readonly what: string;
+      readonly remoteMoved: boolean;
+      readonly localEdited: boolean;
+      readonly expected: readonly {
+        readonly from: SyncDirection;
+        readonly to: SyncDirection;
+        readonly first: SyncOutcome;
+        readonly second: SyncOutcome;
+        readonly local: string;
+        readonly uploads: number;
+      }[];
+    }
 
-      expect(await engine.sync()).toBe('skipped');
+    const DIVERGENCES: readonly Divergence[] = [
+      {
+        what: 'the service moved on and this device has no edits of its own',
+        remoteMoved: true,
+        localEdited: false,
+        // Whatever the pair, the device ends up holding the service's tree: a send-only
+        // device that skipped it picks it up on the switch, which is the whole point of
+        // not recording a revision it declined to apply.
+        expected: [
+          { from: 'two-way', to: 'push-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'two-way', to: 'pull-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'push-only', to: 'two-way', first: 'skipped', second: 'pulled', local: 'R', uploads: 0 },
+          { from: 'push-only', to: 'pull-only', first: 'skipped', second: 'pulled', local: 'R', uploads: 0 },
+          { from: 'pull-only', to: 'two-way', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'pull-only', to: 'push-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+        ],
+      },
+      {
+        what: 'this device was edited and the service stood still',
+        remoteMoved: false,
+        localEdited: true,
+        // Only a receive-only device loses the edit, and it loses it on the *first* sync —
+        // switching afterwards cannot bring it back, which is why the setting is asked for
+        // at setup. Note the two-way/send-only rows: having already pushed the edit, the
+        // device keeps it after switching to receive-only rather than reverting it.
+        expected: [
+          { from: 'two-way', to: 'push-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'two-way', to: 'pull-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'push-only', to: 'two-way', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'push-only', to: 'pull-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'pull-only', to: 'two-way', first: 'reverted', second: 'idle', local: 'X', uploads: 0 },
+          { from: 'pull-only', to: 'push-only', first: 'reverted', second: 'idle', local: 'X', uploads: 0 },
+        ],
+      },
+      {
+        what: 'both sides changed',
+        remoteMoved: true,
+        localEdited: true,
+        // The one-way devices resolve it by their own rule and the losing side's edit is
+        // gone for good; only a two-way first run keeps both. Every pair still converges —
+        // the second run is `idle`, never a device stuck asking the service the same
+        // question for ever.
+        expected: [
+          { from: 'two-way', to: 'push-only', first: 'merged', second: 'idle', local: 'L+R', uploads: 1 },
+          { from: 'two-way', to: 'pull-only', first: 'merged', second: 'idle', local: 'L+R', uploads: 1 },
+          { from: 'push-only', to: 'two-way', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'push-only', to: 'pull-only', first: 'pushed', second: 'idle', local: 'L+X', uploads: 1 },
+          { from: 'pull-only', to: 'two-way', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+          { from: 'pull-only', to: 'push-only', first: 'pulled', second: 'idle', local: 'R', uploads: 0 },
+        ],
+      },
+    ];
 
-      await store.setSettings({ syncDirection: 'two-way' });
-      expect(await engine.sync()).toBe('pulled');
-      expect(provider.bookmarks).toEqual(deserializeBookmarks(serializeBookmarks(remoteTree)));
-      expect(await store.getLastUpdated()).toBe('T2');
-    });
+    /** The toolbar's bookmark titles, sorted — a compact description of the local tree. */
+    function localTitles(tree: Bookmark[]): string {
+      const toolbar = tree.find((node) => node.title === BookmarkContainer.Toolbar);
+      return (toolbar?.children ?? [])
+        .map((child) => child.title)
+        .sort()
+        .join('+');
+    }
 
-    it('merges rather than overwrites when the switched device also has local edits', async () => {
+    async function syncThenSwitch(
+      from: SyncDirection,
+      to: SyncDirection,
+      remoteMoved: boolean,
+      localEdited: boolean,
+    ) {
+      const hash = await getPasswordHash('pw', SYNC_ID);
+      const payload = await encryptData(
+        serializeBookmarks(remoteMoved ? remoteTree : sampleBookmarks),
+        hash,
+      );
+      let uploads = 0;
+      const api = fakeApi({
+        getSync: vi.fn(async () => ({
+          bookmarks: payload,
+          version: APP_VERSION,
+          lastUpdated: remoteMoved ? 'T2' : 'T1',
+        })),
+        // Once this device has uploaded, the service's timestamp is the one it produced.
+        getLastUpdated: vi.fn(async () => (uploads > 0 ? `U${uploads}` : remoteMoved ? 'T2' : 'T1')),
+        updateSync: vi.fn(async () => `U${++uploads}`),
+      });
+      const { store, provider, engine } = await enabledEngine(api, from);
+      if (localEdited) {
+        provider.bookmarks[0]!.children!.push({ title: 'L', url: 'https://l.org' });
+      }
+
+      const first = await engine.sync();
+      await store.setSettings({ syncDirection: to });
+      const second = await engine.sync();
+      return { first, second, local: localTitles(provider.bookmarks), uploads };
+    }
+
+    for (const divergence of DIVERGENCES) {
+      describe(`when ${divergence.what}`, () => {
+        for (const row of divergence.expected) {
+          it(`goes ${row.first} then ${row.second} switching ${row.from} → ${row.to}`, async () => {
+            const result = await syncThenSwitch(
+              row.from,
+              row.to,
+              divergence.remoteMoved,
+              divergence.localEdited,
+            );
+            expect(result).toEqual({
+              first: row.first,
+              second: row.second,
+              local: row.local,
+              uploads: row.uploads,
+            });
+          });
+        }
+      });
+    }
+
+    it('keeps the merge base usable when a send-only device is switched mid-divergence', async () => {
+      // The matrix above records outcomes; this is the invariant underneath them. A
+      // send-only device must not advance its stored timestamp past a revision it never
+      // applied, or the switched device compares equal timestamps, reports `idle` and
+      // then overwrites a sync it has never read.
       const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
       const { store, provider, engine } = await enabledEngine(api, 'push-only');
-      expect(await engine.sync()).toBe('skipped');
 
-      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+      expect(await engine.sync()).toBe('skipped');
+      expect(await store.getLastUpdated()).toBe('T1');
+
+      provider.bookmarks[0]!.children!.push({ title: 'L', url: 'https://l.org' });
       await store.setSettings({ syncDirection: 'two-way' });
 
       expect(await engine.sync()).toBe('merged');
-      // Neither side's addition is lost: the cached tree is still a valid merge base,
-      // because a send-only device only ever advances it by uploading.
       const titles = provider.bookmarks[0]!.children!.map((child) => child.title);
-      expect(titles).toContain('Local');
+      expect(titles).toContain('L');
       expect(titles).toContain('R');
-    });
-
-    it('starts mirroring when a receive-only device is switched to two-way', async () => {
-      // The reverse switch needs no repair: a receive-only device only ever advances the
-      // timestamp by applying the tree that came with it.
-      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
-      const { store, provider, engine } = await enabledEngine(api, 'pull-only');
-      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
-
-      await store.setSettings({ syncDirection: 'two-way' });
-
-      // The local edit is now legitimate and gets pushed instead of undone.
-      expect(await engine.sync()).toBe('pushed');
-      expect(api.updateSync).toHaveBeenCalledOnce();
     });
   });
 
