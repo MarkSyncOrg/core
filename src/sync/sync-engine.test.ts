@@ -727,7 +727,7 @@ describe('SyncEngine one-way sync direction', () => {
       expect(await store.getLastUpdated()).toBe('T3');
     });
 
-    it('records a remote change as seen without applying it', async () => {
+    it('leaves a remote change alone without pretending to have applied it', async () => {
       const api = await changedRemoteApi();
       const { store, provider, engine } = await enabledEngine(api, 'push-only');
 
@@ -736,8 +736,22 @@ describe('SyncEngine one-way sync direction', () => {
       expect(provider.setBookmarks).not.toHaveBeenCalled();
       expect(provider.bookmarks).toEqual(sampleBookmarks);
       expect(api.updateSync).not.toHaveBeenCalled();
-      // Carrying the timestamp forward is what keeps the next local edit uploadable.
-      expect(await store.getLastUpdated()).toBe('T2');
+      // The stored timestamp stays behind the service's: advancing it would record a
+      // revision this device never took, and the next sync would report `idle`.
+      expect(await store.getLastUpdated()).toBe('T1');
+    });
+
+    it('pushes a local edit over a service that moved on, without conflicting', async () => {
+      // The stored timestamp is stale by design after a skip, so `push` uploads against
+      // the service's current one — this device cannot resolve a conflict by pulling.
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+
+      await engine.push();
+
+      expect((api.updateSync as ReturnType<typeof vi.fn>).mock.calls[0]![2]).toBe('T2');
+      expect(await store.getLastUpdated()).toBe('T3');
     });
 
     it('is idle when neither side changed', async () => {
@@ -886,6 +900,53 @@ describe('SyncEngine one-way sync direction', () => {
       expect(api.updateSync).toHaveBeenCalledOnce();
       expect(provider.setBookmarks).not.toHaveBeenCalled();
       expect(await store.isSyncEnabled()).toBe(true);
+    });
+  });
+
+  describe('changing direction afterwards', () => {
+    it('pulls what it skipped once a send-only device is switched back to two-way', async () => {
+      // The case a user actually hits: set up one-way, change your mind in the settings.
+      // The device must reconcile from the last state both sides shared, not report
+      // `idle` against a sync whose current contents it has never seen.
+      const api = await changedRemoteApi();
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+
+      expect(await engine.sync()).toBe('skipped');
+
+      await store.setSettings({ syncDirection: 'two-way' });
+      expect(await engine.sync()).toBe('pulled');
+      expect(provider.bookmarks).toEqual(deserializeBookmarks(serializeBookmarks(remoteTree)));
+      expect(await store.getLastUpdated()).toBe('T2');
+    });
+
+    it('merges rather than overwrites when the switched device also has local edits', async () => {
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await enabledEngine(api, 'push-only');
+      expect(await engine.sync()).toBe('skipped');
+
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+      await store.setSettings({ syncDirection: 'two-way' });
+
+      expect(await engine.sync()).toBe('merged');
+      // Neither side's addition is lost: the cached tree is still a valid merge base,
+      // because a send-only device only ever advances it by uploading.
+      const titles = provider.bookmarks[0]!.children!.map((child) => child.title);
+      expect(titles).toContain('Local');
+      expect(titles).toContain('R');
+    });
+
+    it('starts mirroring when a receive-only device is switched to two-way', async () => {
+      // The reverse switch needs no repair: a receive-only device only ever advances the
+      // timestamp by applying the tree that came with it.
+      const api = fakeApi({ getLastUpdated: vi.fn(async () => 'T1') });
+      const { store, provider, engine } = await enabledEngine(api, 'pull-only');
+      provider.bookmarks[0]!.children!.push({ title: 'Local', url: 'https://local.org' });
+
+      await store.setSettings({ syncDirection: 'two-way' });
+
+      // The local edit is now legitimate and gets pushed instead of undone.
+      expect(await engine.sync()).toBe('pushed');
+      expect(api.updateSync).toHaveBeenCalledOnce();
     });
   });
 

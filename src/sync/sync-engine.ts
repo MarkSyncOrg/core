@@ -175,12 +175,19 @@ export class SyncEngine {
   /**
    * Pushes the browser's current bookmarks to the service. Throws SyncConflictError if
    * the remote sync changed since the last pull; the caller should pull and retry.
+   *
+   * A `push-only` device uploads against the service's current timestamp instead, so it
+   * never conflicts: it is the source, and pulling — the only way to resolve a conflict —
+   * is exactly what it is not allowed to do.
    */
   async push(): Promise<void> {
     const { api, info } = await this.requireSync();
     await this.requireDirection('push');
 
-    const lastUpdated = await this.store.getLastUpdated();
+    const lastUpdated =
+      (await this.getDirection()) === 'push-only'
+        ? await api.getLastUpdated(info.syncId)
+        : await this.store.getLastUpdated();
     const newLastUpdated = await this.uploadLocal(api, info.syncId, info.passwordHash, lastUpdated);
     await this.store.setLastUpdated(newLastUpdated);
   }
@@ -248,9 +255,16 @@ export class SyncEngine {
    *
    * When there are local edits they are uploaded against the service's *current*
    * timestamp, so the upload always wins rather than raising a conflict the device is
-   * not allowed to resolve by pulling. When there are none, a remote change is recorded
-   * as seen without being applied — carrying the timestamp forward is what keeps the
-   * next local edit uploadable instead of conflicting for ever.
+   * not allowed to resolve by pulling. When there are none, the remote change is simply
+   * left alone.
+   *
+   * Note what is deliberately *not* done: the stored timestamp is never advanced to a
+   * revision this device declined to apply. Doing so would leave the device believing it
+   * held the service's state while it did not, and the lie would outlive the setting —
+   * switched back to two-way, the device would report `idle` against a sync it has never
+   * seen, and its next push would silently overwrite it. Leaving the timestamp behind
+   * keeps `remoteChanged` true, so whatever direction it is switched to afterwards
+   * reconciles from the last state the two sides genuinely shared.
    */
   private async syncPushOnly(
     api: ApiClient,
@@ -260,11 +274,7 @@ export class SyncEngine {
     dirty: boolean,
   ): Promise<SyncOutcome> {
     if (!dirty) {
-      if (!remoteChanged) {
-        return 'idle';
-      }
-      await this.store.setLastUpdated(remoteLastUpdated);
-      return 'skipped';
+      return remoteChanged ? 'skipped' : 'idle';
     }
     const newLastUpdated = await this.uploadLocal(
       api,
