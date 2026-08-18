@@ -61,6 +61,7 @@ describe('SyncStore', () => {
       syncIntervalMinutes: 15,
       syncBookmarksToolbar: true,
       syncOnChange: true,
+      syncDirection: 'two-way',
     });
   });
 
@@ -73,12 +74,13 @@ describe('SyncStore', () => {
   });
 
   it('preserves settings across clear()', async () => {
-    await store.setSettings({ theme: 'light', syncOnChange: false });
+    await store.setSettings({ theme: 'light', syncOnChange: false, syncDirection: 'pull-only' });
     await store.setSyncInfo(syncInfo);
     await store.clear();
 
     const settings = await store.getSettings();
     expect(settings.theme).toBe('light');
     expect(settings.syncOnChange).toBe(false);
+    expect(settings.syncDirection).toBe('pull-only');
   });
 });

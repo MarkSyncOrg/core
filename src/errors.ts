@@ -52,6 +52,12 @@ export class InvalidCredentialsError extends XbsError {}
 export class SyncNotEnabledError extends XbsError {}
 
 /**
+ * An operation was attempted in a direction this device's `syncDirection` setting
+ * forbids — uploading from a receive-only device, or downloading onto a send-only one.
+ */
+export class SyncDirectionError extends XbsError {}
+
+/**
  * Bookmark data from an untrusted source (a backup file, a sync payload) is not a
  * well-formed bookmark tree — wrong shape, wrong field types, or nested too deeply.
  */
