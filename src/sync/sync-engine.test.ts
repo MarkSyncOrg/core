@@ -824,6 +824,71 @@ describe('SyncEngine one-way sync direction', () => {
     });
   });
 
+  describe('joining an existing sync', () => {
+    /** A store/provider pair with a direction set but no sync enabled yet. */
+    async function pendingEngine(api: ApiClient, direction: SyncDirection) {
+      const built = buildEngine(api);
+      await built.store.setSettings({ syncDirection: direction });
+      built.provider.bookmarks = structuredClone(sampleBookmarks);
+      return built;
+    }
+
+    it('uploads instead of applying when the device only sends', async () => {
+      const api = await changedRemoteApi({ updateSync: vi.fn(async () => 'T3') });
+      const { store, provider, engine } = await pendingEngine(api, 'push-only');
+
+      await engine.enableExistingSync(SERVICE_URL, SYNC_ID, 'pw');
+
+      // The remote tree never lands in the browser — joining is not an exception to
+      // "this device never receives".
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(provider.bookmarks).toEqual(sampleBookmarks);
+      // ...and the service is left holding this device's tree instead.
+      const [, , against] = (api.updateSync as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(against).toBe('T2');
+      expect(await store.getLastUpdated()).toBe('T3');
+      expect(await store.isSyncEnabled()).toBe(true);
+      expect(await engine.isDirty()).toBe(false);
+    });
+
+    it('still rejects a wrong password before uploading anything', async () => {
+      // Credentials are proven by decrypting the existing payload. Skipping that check
+      // for a send-only device would re-encrypt the sync under a key nobody else holds.
+      const api = await changedRemoteApi();
+      const { store, engine } = await pendingEngine(api, 'push-only');
+
+      await expect(engine.enableExistingSync(SERVICE_URL, SYNC_ID, 'wrong')).rejects.toBeInstanceOf(
+        InvalidCredentialsError,
+      );
+      expect(api.updateSync).not.toHaveBeenCalled();
+      expect(await store.isSyncEnabled()).toBe(false);
+    });
+
+    it('applies the remote tree when the device only receives', async () => {
+      const api = await changedRemoteApi();
+      const { store, provider, engine } = await pendingEngine(api, 'pull-only');
+
+      await engine.enableExistingSync(SERVICE_URL, SYNC_ID, 'pw');
+
+      expect(provider.bookmarks).toEqual(deserializeBookmarks(serializeBookmarks(remoteTree)));
+      expect(api.updateSync).not.toHaveBeenCalled();
+      expect(await store.getLastUpdated()).toBe('T2');
+    });
+
+    it('seeds a new sync from local bookmarks whatever the direction', async () => {
+      // A new sync has to come from somewhere, so this upload happens even on a
+      // receive-only device; it is the last thing that device ever sends.
+      const api = fakeApi({ updateSync: vi.fn(async () => 'T1') });
+      const { store, provider, engine } = await pendingEngine(api, 'pull-only');
+
+      await engine.enableNewSync(SERVICE_URL, 'pw');
+
+      expect(api.updateSync).toHaveBeenCalledOnce();
+      expect(provider.setBookmarks).not.toHaveBeenCalled();
+      expect(await store.isSyncEnabled()).toBe(true);
+    });
+  });
+
   it('reports the configured direction in the status', async () => {
     const { engine } = await enabledEngine(fakeApi(), 'pull-only');
     expect((await engine.getStatus()).direction).toBe('pull-only');

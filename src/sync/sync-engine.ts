@@ -71,9 +71,11 @@ export type SyncOutcome = 'idle' | 'pushed' | 'pulled' | 'merged' | 'skipped' | 
  * `push-only` device never applies the service's tree, and a `pull-only` one never
  * uploads its own; the guards live here rather than in the callers so the direction
  * holds for background sync, bookmark-change pushes and the recovery actions alike.
- * Enabling a sync is exempt: `enableNewSync` has to upload the tree it creates the sync
- * from, and `enableExistingSync` has to download the one it is joining, and both are
- * explicit setup steps the user just asked for.
+ * Enabling a sync is the one place the direction shapes the operation instead of
+ * forbidding it: `enableNewSync` always uploads, because a new sync has to be seeded from
+ * something, while `enableExistingSync` uploads rather than applies on a `push-only`
+ * device, so joining a sync cannot become the single overwrite the setting exists to
+ * prevent.
  */
 export class SyncEngine {
   private readonly store: SyncStore;
@@ -118,6 +120,13 @@ export class SyncEngine {
   /**
    * Enables sync against an existing sync ID, downloading and applying its bookmarks.
    * Throws InvalidCredentialsError if the password cannot decrypt the data.
+   *
+   * A `push-only` device joins the other way round: it uploads its own tree instead of
+   * applying the service's, because a device that is never allowed to receive must not
+   * receive on the way in either — that first apply would be the one overwrite the
+   * setting exists to prevent. The payload is still downloaded and decrypted first,
+   * since that is what proves the password is right: joining with a wrong one and then
+   * uploading would re-encrypt the sync under a key nobody else can read.
    */
   async enableExistingSync(serviceUrl: string, syncId: string, password: string): Promise<void> {
     if (!isValidSyncId(syncId)) {
@@ -131,6 +140,12 @@ export class SyncEngine {
     const passwordHash = await getPasswordHash(password, syncId);
     const remote = await api.getSync(syncId);
     const bookmarks = await this.decryptBookmarks(remote.bookmarks, passwordHash);
+
+    if ((await this.getDirection()) === 'push-only') {
+      const lastUpdated = await this.uploadLocal(api, syncId, passwordHash, remote.lastUpdated);
+      await this.persist({ serviceUrl, syncId, passwordHash }, remote.version, lastUpdated);
+      return;
+    }
 
     await this.applyRemote(bookmarks);
     await this.persist({ serviceUrl, syncId, passwordHash }, remote.version, remote.lastUpdated);
