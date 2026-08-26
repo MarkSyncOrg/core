@@ -10,4 +10,14 @@ export interface BookmarkProvider {
   getBookmarks(): Promise<Bookmark[]>;
   /** Replaces all browser bookmarks with the given xBrowserSync tree. */
   setBookmarks(bookmarks: Bookmark[]): Promise<void>;
+  /**
+   * Whether this browser has anything to store a separator in. Only Firefox does;
+   * Chromium has no equivalent, so a tree written there comes back without them.
+   *
+   * The engine needs to be told rather than to guess, because the two cases look
+   * identical from the outside: a tree that has lost its separators to the browser and
+   * one whose separators the user deleted read exactly the same. Assumed true when a
+   * provider says nothing, since that is the plain reading of the tree it hands over.
+   */
+  readonly holdsSeparators?: boolean;
 }

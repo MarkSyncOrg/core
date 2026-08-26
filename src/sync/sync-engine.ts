@@ -7,6 +7,10 @@ import {
   serializeBookmarks,
 } from '../bookmarks/bookmark.js';
 import {
+  restoreMissingContainers,
+  restoreMissingSeparators,
+} from '../bookmarks/restore.js';
+import {
   acceptBookmarkTree,
   acceptBookmarkTreeWithReport,
   reinstateRemovedBookmarks,
@@ -101,13 +105,9 @@ export class SyncEngine {
     const created = await api.createSync(this.appVersion);
     const passwordHash = await getPasswordHash(password, created.id);
 
-    const lastUpdated = await this.uploadLocal(
-      api,
-      created.id,
-      passwordHash,
-      created.lastUpdated,
-      this.appVersion,
-    );
+    const lastUpdated = await this.uploadLocal(api, created.id, passwordHash, created.lastUpdated, {
+      version: this.appVersion,
+    });
 
     await this.persist(
       { serviceUrl, syncId: created.id, passwordHash },
@@ -142,7 +142,9 @@ export class SyncEngine {
     const bookmarks = await this.decryptBookmarks(remote.bookmarks, passwordHash);
 
     if ((await this.getDirection()) === 'push-only') {
-      const lastUpdated = await this.uploadLocal(api, syncId, passwordHash, remote.lastUpdated);
+      const lastUpdated = await this.uploadLocal(api, syncId, passwordHash, remote.lastUpdated, {
+        reference: bookmarks,
+      });
       await this.persist({ serviceUrl, syncId, passwordHash }, remote.version, lastUpdated);
       return;
     }
@@ -390,7 +392,7 @@ export class SyncEngine {
     if (cached === undefined) {
       return false;
     }
-    const current = canonicalizeBookmarks(await this.localBookmarks());
+    const current = canonicalizeBookmarks(await this.localBookmarks(deserializeBookmarks(cached)));
     return current !== cached;
   }
 
@@ -448,15 +450,39 @@ export class SyncEngine {
   }
 
   /**
-   * The browser's current bookmarks, validated and stripped of unsafe-URL nodes.
+   * The browser's current bookmarks, validated, stripped of unsafe-URL nodes, and with
+   * the containers this device cannot hold carried over from `reference`.
    *
    * Every read of the local tree goes through here so the same policy applies to both
    * sides of a comparison. Sanitising only the remote tree would leave local and cached
    * permanently unequal, and {@link isDirty} compares them — the tree would look edited
-   * on every check and sync in a loop.
+   * on every check and sync in a loop. Restoring what the browser cannot hold is the
+   * same argument one level up: a browser with no bookmarks menu reads a tree with no
+   * `[xbs] Menu`, and one with no separators reads a tree with none of those, and
+   * without this either would look edited against every tree a browser that has them
+   * wrote — then delete them from the sync on its next upload (see ../bookmarks/restore).
+   *
+   * Separators are restored only where the provider says this browser cannot hold one.
+   * Where it can, its tree is the truth: restoring into it would put back the separator
+   * the user just deleted, on the very next read.
+   *
+   * `reference` is the tree the sync last held; it defaults to the cached one, and
+   * callers that have just applied a remote tree pass that instead, since the cache is
+   * about to be replaced by whatever this returns.
    */
-  private async localBookmarks(): Promise<Bookmark[]> {
-    return (await this.readLocal()).bookmarks;
+  private async localBookmarks(reference?: readonly Bookmark[]): Promise<Bookmark[]> {
+    const local = (await this.readLocal()).bookmarks;
+    const from = reference ?? (await this.cachedBookmarks());
+    const restored = restoreMissingContainers(local, from);
+    return (this.provider.holdsSeparators ?? true)
+      ? restored
+      : restoreMissingSeparators(restored, from);
+  }
+
+  /** The last-synced tree, as a tree; empty when nothing has been synced yet. */
+  private async cachedBookmarks(): Promise<Bookmark[]> {
+    const cached = await this.store.getCachedBookmarks();
+    return cached ? deserializeBookmarks(cached) : [];
   }
 
   /**
@@ -474,9 +500,9 @@ export class SyncEngine {
     syncId: string,
     passwordHash: string,
     lastUpdated: string | undefined,
-    version?: string,
+    { version, reference }: { version?: string; reference?: readonly Bookmark[] } = {},
   ): Promise<string> {
-    const local = assignIds(await this.localBookmarks());
+    const local = assignIds(await this.localBookmarks(reference));
     const encrypted = await encryptData(serializeBookmarks(local), passwordHash);
     const newLastUpdated = await api.updateSync(syncId, encrypted, lastUpdated, version);
     await this.store.setCachedBookmarks(canonicalizeBookmarks(local));
@@ -494,6 +520,13 @@ export class SyncEngine {
    * The cache stores the tree *without* them, so it still mirrors what the service holds
    * and {@link isDirty} keeps comparing two sanitised trees.
    *
+   * What is cached is the tree the browser turns out to be holding afterwards, re-read
+   * through the provider — not the tree we asked it to hold. The two are not always the
+   * same: a browser silently drops what it cannot represent (Chromium has no separators),
+   * and it writes nothing at all for a container it has no root for. Caching the intent
+   * instead would leave the device dirty the instant a pull finished, so it would push
+   * that difference straight back and pull it in again on the next pass, forever.
+   *
    * @param preserveLocalUnsafe pass false for a restore, where replacing the whole local
    * tree — bookmarklets included — is what the user asked for.
    */
@@ -504,7 +537,8 @@ export class SyncEngine {
       local = reinstateRemovedBookmarks(bookmarks, removed);
     }
     await this.provider.setBookmarks(local);
-    await this.store.setCachedBookmarks(canonicalizeBookmarks(bookmarks));
+    const applied = await this.localBookmarks(bookmarks);
+    await this.store.setCachedBookmarks(canonicalizeBookmarks(applied));
   }
 
   private async decryptBookmarks(encrypted: string, passwordHash: string): Promise<Bookmark[]> {
