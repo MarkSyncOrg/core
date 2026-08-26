@@ -9,26 +9,22 @@ permissions:
   contents: read
   packages: write
 
-# TODO(supply-chain): pin the three actions below to full commit SHAs. They are floating
-# tags today, so a repointed or compromised tag would execute in a job that holds
-# `packages: write`. Resolve and apply with:
-#
-#   for a in actions/checkout actions/setup-node pnpm/action-setup; do
-#     gh api "repos/$a/git/ref/tags/v4" --jq "\"$a  \(.object.sha)\""
-#   done
-#
-# then rewrite each `uses:` as `owner/repo@<sha> # v4`. Left as tags rather than guessed
-# SHAs because an incorrect digest fails the job outright.
+# Every action below is pinned to a full commit SHA, not a tag. This job holds
+# `packages: write`, so a repointed or compromised tag would publish under our scope. A
+# tag is a mutable pointer; a digest is not. The trailing comment records which release
+# each digest was, since the digest itself says nothing about the version — re-resolve it
+# (`git ls-remote --tags https://github.com/<owner>/<repo> 'v4^{}'`) when bumping, rather
+# than editing the comment to match a version you have not repinned.
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
