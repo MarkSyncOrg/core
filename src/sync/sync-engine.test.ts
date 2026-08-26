@@ -5,6 +5,7 @@ import {
   BookmarkContainer,
   canonicalizeBookmarks,
   deserializeBookmarks,
+  SEPARATOR_URL,
   serializeBookmarks,
   stripIds,
 } from '../bookmarks/bookmark';
@@ -1067,5 +1068,205 @@ describe('SyncEngine one-way sync direction', () => {
   it('reports the configured direction in the status', async () => {
     const { engine } = await enabledEngine(fakeApi(), 'pull-only');
     expect((await engine.getStatus()).direction).toBe('pull-only');
+  });
+});
+
+/**
+ * A device whose browser only has roots for some of the containers, like a real one:
+ * Chromium has no bookmarks menu, and a device with the toolbar setting off has no room
+ * for `[xbs] Toolbar`. Containers it cannot hold are neither read nor written — exactly
+ * what WebextBookmarkProvider does with a container it has no local root for.
+ */
+class ContainerProvider implements BookmarkProvider {
+  readonly roots = new Map<string, Bookmark[]>();
+
+  constructor(containers: BookmarkContainer[]) {
+    for (const container of containers) {
+      this.roots.set(container, []);
+    }
+  }
+
+  getBookmarks(): Promise<Bookmark[]> {
+    return Promise.resolve(
+      [...this.roots].map(([title, children]) => structuredClone({ title, children })),
+    );
+  }
+
+  setBookmarks(bookmarks: Bookmark[]): Promise<void> {
+    for (const container of bookmarks) {
+      if (container.title !== undefined && this.roots.has(container.title)) {
+        this.roots.set(container.title, structuredClone(container.children ?? []));
+      }
+    }
+    return Promise.resolve();
+  }
+}
+
+/** An in-memory sync, so two engines can be pointed at the same service. */
+class FakeService implements ApiClient {
+  bookmarks = '';
+  lastUpdated = 'T0';
+  private clock = 0;
+
+  getInfo = vi.fn(async () => ({
+    status: 1 as const,
+    version: APP_VERSION,
+    location: 'GB',
+    maxSyncSize: 1048576,
+    message: '',
+  }));
+  createSync = vi.fn(async () => ({
+    id: SYNC_ID,
+    lastUpdated: this.lastUpdated,
+    version: APP_VERSION,
+  }));
+  getSync = vi.fn(async () => ({
+    bookmarks: this.bookmarks,
+    version: APP_VERSION,
+    lastUpdated: this.lastUpdated,
+  }));
+  getLastUpdated = vi.fn(async () => this.lastUpdated);
+  updateSync = vi.fn(async (_id: string, bookmarks: string) => {
+    this.bookmarks = bookmarks;
+    this.clock += 1;
+    this.lastUpdated = `T${this.clock}`;
+    return this.lastUpdated;
+  });
+}
+
+async function joinSync(
+  service: FakeService,
+  containers: BookmarkContainer[],
+  passwordHash: string,
+) {
+  const store = new SyncStore(new MemoryStorageArea());
+  const provider = new ContainerProvider(containers);
+  await store.setSyncInfo({ serviceUrl: SERVICE_URL, syncId: SYNC_ID, passwordHash });
+  await store.setSyncEnabled(true);
+  const engine = new SyncEngine({
+    store,
+    provider,
+    appVersion: APP_VERSION,
+    createApi: () => service,
+  });
+  return { store, provider, engine };
+}
+
+describe('SyncEngine containers a device cannot hold', () => {
+  const FIREFOX = [BookmarkContainer.Toolbar, BookmarkContainer.Menu, BookmarkContainer.Other];
+  const CHROMIUM = [BookmarkContainer.Toolbar, BookmarkContainer.Other];
+
+  /**
+   * Regression test for the sync loop reported in app-next#22: a Firefox device and a
+   * Chromium one never agreed on `[xbs] Menu`, so each pass deleted it and put it back,
+   * and every pass rewrote the whole local tree — the browser's toolbar visibly emptied
+   * and refilled every few minutes on both machines, with nobody touching a bookmark.
+   */
+  it('two browsers of different families settle instead of overwriting each other', async () => {
+    const service = new FakeService();
+    const passwordHash = await getPasswordHash('pw', SYNC_ID);
+    const firefox = await joinSync(service, FIREFOX, passwordHash);
+    const chromium = await joinSync(service, CHROMIUM, passwordHash);
+
+    firefox.provider.roots.set(BookmarkContainer.Toolbar, [{ title: 'X', url: 'https://x.org' }]);
+    firefox.provider.roots.set(BookmarkContainer.Menu, [{ title: 'M', url: 'https://m.org' }]);
+    await firefox.engine.push();
+    await chromium.engine.forcePull();
+
+    const outcomes: SyncOutcome[] = [];
+    for (let pass = 0; pass < 4; pass += 1) {
+      outcomes.push(await firefox.engine.sync());
+      outcomes.push(await chromium.engine.sync());
+    }
+
+    expect(outcomes).toEqual(new Array(8).fill('idle'));
+    // The menu survived in the sync, and on the device that has a root for it.
+    expect(stripIds(firefox.provider.roots.get(BookmarkContainer.Menu) ?? [])).toEqual([
+      { title: 'M', url: 'https://m.org' },
+    ]);
+  });
+
+  it('does not delete a container it has no root for when it pushes a local edit', async () => {
+    const service = new FakeService();
+    const passwordHash = await getPasswordHash('pw', SYNC_ID);
+    const firefox = await joinSync(service, FIREFOX, passwordHash);
+    const chromium = await joinSync(service, CHROMIUM, passwordHash);
+
+    firefox.provider.roots.set(BookmarkContainer.Menu, [{ title: 'M', url: 'https://m.org' }]);
+    await firefox.engine.push();
+    await chromium.engine.forcePull();
+
+    chromium.provider.roots.set(BookmarkContainer.Other, [
+      { title: 'New', url: 'https://new.org' },
+    ]);
+    expect(await chromium.engine.sync()).toBe('pushed');
+
+    // The container Chromium has no root for is still in the sync it just wrote.
+    const { decryptData } = await import('../crypto/crypto');
+    const uploaded = deserializeBookmarks(await decryptData(service.bookmarks, passwordHash));
+    expect(uploaded.map((container) => container.title)).toContain(BookmarkContainer.Menu);
+
+    // Firefox takes the new bookmark and keeps its menu. IDs are reassigned on every
+    // upload, so the comparison is on content — which is all a provider writes.
+    expect(await firefox.engine.sync()).toBe('pulled');
+    expect(stripIds(firefox.provider.roots.get(BookmarkContainer.Menu) ?? [])).toEqual([
+      { title: 'M', url: 'https://m.org' },
+    ]);
+    expect(stripIds(firefox.provider.roots.get(BookmarkContainer.Other) ?? [])).toEqual([
+      { title: 'New', url: 'https://new.org' },
+    ]);
+  });
+
+  it('leaves the toolbar in the sync alone while the device excludes it', async () => {
+    const service = new FakeService();
+    const passwordHash = await getPasswordHash('pw', SYNC_ID);
+    const withToolbar = await joinSync(service, FIREFOX, passwordHash);
+    const withoutToolbar = await joinSync(service, [BookmarkContainer.Other], passwordHash);
+
+    withToolbar.provider.roots.set(BookmarkContainer.Toolbar, [
+      { title: 'X', url: 'https://x.org' },
+    ]);
+    await withToolbar.engine.push();
+    await withoutToolbar.engine.forcePull();
+
+    const outcomes: SyncOutcome[] = [];
+    for (let pass = 0; pass < 3; pass += 1) {
+      outcomes.push(await withToolbar.engine.sync());
+      outcomes.push(await withoutToolbar.engine.sync());
+    }
+
+    expect(outcomes).toEqual(new Array(6).fill('idle'));
+    expect(stripIds(withToolbar.provider.roots.get(BookmarkContainer.Toolbar) ?? [])).toEqual([
+      { title: 'X', url: 'https://x.org' },
+    ]);
+  });
+
+  it('caches what the browser kept, not what it was asked to keep', async () => {
+    const service = new FakeService();
+    const passwordHash = await getPasswordHash('pw', SYNC_ID);
+    const firefox = await joinSync(service, FIREFOX, passwordHash);
+    const chromium = await joinSync(service, CHROMIUM, passwordHash);
+
+    // A separator: Firefox can hold one, Chromium cannot.
+    firefox.provider.roots.set(BookmarkContainer.Toolbar, [
+      { title: 'X', url: 'https://x.org' },
+      { url: SEPARATOR_URL },
+    ]);
+    await firefox.engine.push();
+
+    // Chromium's provider keeps everything it is given, so drop the separator the way a
+    // real Chromium build does: silently, on the way in.
+    const keep = chromium.provider.setBookmarks.bind(chromium.provider);
+    chromium.provider.setBookmarks = (bookmarks: Bookmark[]) =>
+      keep(
+        bookmarks.map((container) => ({
+          ...container,
+          children: (container.children ?? []).filter((node) => node.url !== SEPARATOR_URL),
+        })),
+      );
+
+    await chromium.engine.forcePull();
+    expect(await chromium.engine.isDirty()).toBe(false);
+    expect(await chromium.engine.sync()).toBe('idle');
   });
 });

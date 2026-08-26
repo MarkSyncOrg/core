@@ -25,6 +25,7 @@ export {
   nativeToBookmarks,
   assignIds,
   getContainer,
+  restoreMissingContainers,
   stripIds,
   canonicalizeBookmarks,
   serializeBookmarks,
