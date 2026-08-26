@@ -4,6 +4,10 @@
 the OpenAPI contract, and the dependency tree).
 **Baseline:** 113 tests pass, `tsc --noEmit` clean, no secrets in the working tree or history.
 
+**Follow-up:** findings 5 and 8 were left open by the original pass and closed later, on
+top of `2687e2c`. Their entries below say what changed and why the earlier reasoning no
+longer held; everything else is as first written.
+
 This package is a platform-agnostic library consumed by a PWA and a web-extension rewrite.
 That matters for severity: **the library is the trust boundary** for bookmark data arriving
 from backup files, shared syncs, and the sync service. Validation it omits is validation that
@@ -23,10 +27,10 @@ they are part of the result, not omissions.
 | 2 | **Medium** | `parseBackup` does no schema validation on unauthenticated input | `src/backup/backup.ts:51` | **Fixed** |
 | 3 | **Medium** | Unbounded recursion over bookmark trees → stack-overflow DoS | `src/bookmarks/bookmark.ts:95`, `src/sync/merge.ts:86` | **Fixed** |
 | 4 | **Medium** | `serviceUrl` accepted with no validation or scheme allowlist | `src/api/xbrowsersync-api.ts:79` | **Fixed** |
-| 5 | **Medium** | Publish workflow has no test gate and uses mutable action tags | `.github/workflows/publish.yml:27` | Partly fixed |
+| 5 | **Medium** | Publish workflow has no test gate and uses mutable action tags | `.github/workflows/publish.yml:27` | **Fixed** |
 | 6 | Low | Derived AES key persisted in plaintext storage | `src/storage/sync-store.ts:9` | Documented |
 | 7 | Low | No rollback protection against a malicious/compromised service | `src/sync/sync-engine.ts:114` | Documented |
-| 8 | Low | 5 vulnerable transitive dependencies (all dev-only) | `pnpm-lock.yaml` | Partly fixed |
+| 8 | Low | 5 vulnerable transitive dependencies (all dev-only) | `pnpm-lock.yaml` | **Fixed** |
 | 9 | Low | Sync-ID format declared in OpenAPI but never enforced client-side | `openapi/xbrowsersync-api.yaml:255` | **Fixed** |
 | 10 | Info | `trimToNearestWord` discards the whole string when no space precedes the limit | `src/bookmarks/bookmark.ts:50` | **Fixed** |
 | 11 | Info | Logger persists unredacted messages beside credentials | `src/log/logger.ts:25` | **Fixed** |
@@ -334,20 +338,40 @@ pathname` so nothing else can survive normalisation.
 methods that take one, and in `enableExistingSync` ahead of the 250k-iteration key
 derivation so a typo fails fast with a message about the ID.
 
-**Finding 5 — partly fixed.** `pnpm typecheck` and `pnpm test` now gate the publish job,
-so a tag cannot publish past a red build. The actions are **still on floating tags**: the
-GitHub API is outside this session's repository scope, so the real commit SHAs could not
-be resolved, and a guessed digest fails the job outright. The workflow carries a `TODO`
-with the exact `gh api` command to resolve and apply them — this remains open.
+**Finding 5 — fixed.** `pnpm typecheck` and `pnpm test` gate the publish job, so a tag
+cannot publish past a red build, and all three actions are now pinned to full commit
+SHAs resolved from the `v4` tags they carried:
 
-**Finding 8 — partly fixed.** `pnpm-workspace.yaml` (pnpm 11's home for overrides; the
-`package.json` field is ignored) pins `brace-expansion` and `postcss`. Audit is down from
-**5 vulnerabilities to 2**, both the same `js-yaml` advisory. That one is deliberately
-**not** overridden: the advisory's fixed range starts at 4.1.2, but no such release
-exists — the fix ships in 5.x, which removed the `types.merge` export that
-`@redocly/openapi-core` reads, so forcing it breaks `pnpm gen:api` outright (verified).
-The only YAML it parses is this repo's own spec at build time, so there is no untrusted
-input. The reasoning is recorded in `pnpm-workspace.yaml`.
+| action | digest | release |
+| --- | --- | --- |
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | v4.4.0 |
+| `pnpm/action-setup` | `b906affcce14559ad1aafd4ab0e942779e9f58b1` | v4.3.0 |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` | v4.4.0 |
+
+The job holds `packages: write`, which is what made the floating tags worth closing: a
+repointed or compromised tag would have published under our scope. The digests were
+resolved with `git ls-remote --tags <repo> 'v4^{}'` — the dereferenced entry, since these
+are annotated tags and the tag object's own SHA is not what a workflow may pin to.
+
+Note the majors are unchanged. `app-next` runs checkout/setup-node v7 and
+pnpm/action-setup v6, so this repo is a major or two behind on all three; pinning was
+deliberately kept separate from upgrading, because a publish workflow only ever runs on
+a tag push and an upgrade cannot be rehearsed before it matters.
+
+**Finding 8 — fixed.** `pnpm-workspace.yaml` (pnpm 11's home for overrides; the
+`package.json` field is ignored) pins `brace-expansion`, `postcss`, `js-yaml` and
+`nanoid`. `pnpm audit` reports **no known vulnerabilities**, against 5 at review time.
+
+`js-yaml` was the one this review left open, and the reason it gave has expired. Then,
+the only fixed release was in 5.x, which removed the `types.merge` export
+`@redocly/openapi-core` reads — so pinning meant choosing between the advisory and a
+working `pnpm gen:api`. 4.2.0, 4.3.0 and 4.3.1 have shipped since, and 4.3.1 clears all
+three of its advisories (the original merge-key DoS plus two later merge-key and `!!omap`
+ones) inside the major the build needs. Verified by regenerating the spec, not assumed.
+
+Both new entries use a caret rather than `>=`: an open range lets pnpm resolve the newest
+release of *any* major, which for `js-yaml` would reintroduce exactly the 5.x break, and
+for `nanoid` would jump a tree that only wants 3.x onto 5.x.
 
 **Findings 10 and 11.** `trimToNearestWord` hard-cuts at the limit when no word boundary
 precedes it, instead of returning a bare ellipsis. `Logger` scrubs sync IDs, Base64 keys
