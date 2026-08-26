@@ -25,12 +25,17 @@ export {
   nativeToBookmarks,
   assignIds,
   getContainer,
-  restoreMissingContainers,
   stripIds,
   canonicalizeBookmarks,
   serializeBookmarks,
   deserializeBookmarks,
 } from './bookmarks/bookmark.js';
+
+// Putting back what a browser cannot hold (containers with no root, separators)
+export {
+  restoreMissingContainers,
+  restoreMissingSeparators,
+} from './bookmarks/restore.js';
 
 // Bookmark identity (content-based node matching, shared by the merge and the sidecar)
 export { type KeyedBookmark, bookmarkMatchKey, keyBookmarkSiblings } from './bookmarks/identity.js';

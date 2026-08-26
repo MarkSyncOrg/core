@@ -212,36 +212,6 @@ export function getContainer(
   return container;
 }
 
-/**
- * Puts back the top-level containers this device has no room for.
- *
- * No browser has a root for every container: Chromium has no bookmarks menu, and the
- * toolbar is left out entirely while that setting is off. The local tree therefore comes
- * back without them, and uploading it as it stands would delete them from the sync for
- * every other device. Worse, it never settles — the device that dropped a container reads
- * it back from its own roots on the next pass and pushes it again, so two browsers of
- * different families overwrite each other for as long as both are running.
- *
- * A container in `reference` (the tree the sync last held) with no counterpart locally is
- * therefore carried through untouched, at the position it held there. Only containers are
- * treated this way: their titles are reserved, and unlike a folder the user can delete,
- * a missing one always means "this browser cannot hold it", never "it was removed".
- */
-export function restoreMissingContainers(
-  bookmarks: Bookmark[],
-  reference: readonly Bookmark[],
-): Bookmark[] {
-  const isContainer = (node: Bookmark) => getBookmarkType(node) === BookmarkType.Container;
-  const present = new Set(bookmarks.filter(isContainer).map((node) => node.title));
-  const result = [...bookmarks];
-  reference.forEach((node, index) => {
-    if (isContainer(node) && !present.has(node.title)) {
-      result.splice(Math.min(index, result.length), 0, node);
-    }
-  });
-  return result;
-}
-
 /** Returns a copy of the tree with all IDs removed (recursively). */
 export function stripIds(bookmarks: Bookmark[]): Bookmark[] {
   return bookmarks.map(({ id, ...rest }) => {

@@ -1072,15 +1072,19 @@ describe('SyncEngine one-way sync direction', () => {
 });
 
 /**
- * A device whose browser only has roots for some of the containers, like a real one:
- * Chromium has no bookmarks menu, and a device with the toolbar setting off has no room
- * for `[xbs] Toolbar`. Containers it cannot hold are neither read nor written — exactly
- * what WebextBookmarkProvider does with a container it has no local root for.
+ * A device that can hold only some of what the model describes, like a real one:
+ * Chromium has no bookmarks menu and no separators, and a device with the toolbar setting
+ * off has no room for `[xbs] Toolbar`. What it cannot hold is neither read nor written —
+ * a container with no root is skipped, and a separator is silently dropped on the way in,
+ * exactly as WebextBookmarkProvider and the browser beneath it behave.
  */
 class ContainerProvider implements BookmarkProvider {
   readonly roots = new Map<string, Bookmark[]>();
 
-  constructor(containers: BookmarkContainer[]) {
+  constructor(
+    containers: BookmarkContainer[],
+    readonly holdsSeparators = true,
+  ) {
     for (const container of containers) {
       this.roots.set(container, []);
     }
@@ -1095,10 +1099,16 @@ class ContainerProvider implements BookmarkProvider {
   setBookmarks(bookmarks: Bookmark[]): Promise<void> {
     for (const container of bookmarks) {
       if (container.title !== undefined && this.roots.has(container.title)) {
-        this.roots.set(container.title, structuredClone(container.children ?? []));
+        this.roots.set(container.title, this.write(container.children ?? []));
       }
     }
     return Promise.resolve();
+  }
+
+  private write(children: Bookmark[]): Bookmark[] {
+    return structuredClone(children)
+      .filter((node) => this.holdsSeparators || node.url !== SEPARATOR_URL)
+      .map((node) => (node.children ? { ...node, children: this.write(node.children) } : node));
   }
 }
 
@@ -1138,9 +1148,10 @@ async function joinSync(
   service: FakeService,
   containers: BookmarkContainer[],
   passwordHash: string,
+  holdsSeparators = true,
 ) {
   const store = new SyncStore(new MemoryStorageArea());
-  const provider = new ContainerProvider(containers);
+  const provider = new ContainerProvider(containers, holdsSeparators);
   await store.setSyncInfo({ serviceUrl: SERVICE_URL, syncId: SYNC_ID, passwordHash });
   await store.setSyncEnabled(true);
   const engine = new SyncEngine({
@@ -1245,28 +1256,81 @@ describe('SyncEngine containers a device cannot hold', () => {
     const service = new FakeService();
     const passwordHash = await getPasswordHash('pw', SYNC_ID);
     const firefox = await joinSync(service, FIREFOX, passwordHash);
-    const chromium = await joinSync(service, CHROMIUM, passwordHash);
+    const chromium = await joinSync(service, CHROMIUM, passwordHash, false);
 
-    // A separator: Firefox can hold one, Chromium cannot.
     firefox.provider.roots.set(BookmarkContainer.Toolbar, [
-      { title: 'X', url: 'https://x.org' },
+      { title: 'X', url: 'https://x.org/' },
+      { url: SEPARATOR_URL },
+    ]);
+    await firefox.engine.push();
+    await chromium.engine.forcePull();
+
+    // The separator never reached the browser, and the device knows it has no edit.
+    expect(stripIds(chromium.provider.roots.get(BookmarkContainer.Toolbar) ?? [])).toEqual([
+      { title: 'X', url: 'https://x.org/' },
+    ]);
+    expect(await chromium.engine.isDirty()).toBe(false);
+    expect(await chromium.engine.sync()).toBe('idle');
+  });
+
+  it('keeps separators in the sync when a browser without them pushes an edit', async () => {
+    const service = new FakeService();
+    const passwordHash = await getPasswordHash('pw', SYNC_ID);
+    const firefox = await joinSync(service, FIREFOX, passwordHash);
+    const chromium = await joinSync(service, CHROMIUM, passwordHash, false);
+
+    firefox.provider.roots.set(BookmarkContainer.Toolbar, [
+      { title: 'X', url: 'https://x.org/' },
+      { url: SEPARATOR_URL },
+      { title: 'Y', url: 'https://y.org/' },
+    ]);
+    await firefox.engine.push();
+    await chromium.engine.forcePull();
+
+    // A real local edit on the device that cannot hold a separator.
+    chromium.provider.roots.set(BookmarkContainer.Other, [
+      { title: 'New', url: 'https://new.org/' },
+    ]);
+    expect(await chromium.engine.sync()).toBe('pushed');
+
+    const { decryptData } = await import('../crypto/crypto');
+    const uploaded = deserializeBookmarks(await decryptData(service.bookmarks, passwordHash));
+    const toolbar = uploaded.find((c) => c.title === BookmarkContainer.Toolbar);
+    expect(stripIds(toolbar?.children ?? [])).toEqual([
+      { title: 'X', url: 'https://x.org/' },
+      { url: SEPARATOR_URL },
+      { title: 'Y', url: 'https://y.org/' },
+    ]);
+
+    // Firefox takes the new bookmark and still has its separator.
+    expect(await firefox.engine.sync()).toBe('pulled');
+    expect(stripIds(firefox.provider.roots.get(BookmarkContainer.Toolbar) ?? [])).toEqual([
+      { title: 'X', url: 'https://x.org/' },
+      { url: SEPARATOR_URL },
+      { title: 'Y', url: 'https://y.org/' },
+    ]);
+  });
+
+  it('lets a browser that does hold separators delete one', async () => {
+    const service = new FakeService();
+    const passwordHash = await getPasswordHash('pw', SYNC_ID);
+    const firefox = await joinSync(service, FIREFOX, passwordHash);
+
+    firefox.provider.roots.set(BookmarkContainer.Toolbar, [
+      { title: 'X', url: 'https://x.org/' },
       { url: SEPARATOR_URL },
     ]);
     await firefox.engine.push();
 
-    // Chromium's provider keeps everything it is given, so drop the separator the way a
-    // real Chromium build does: silently, on the way in.
-    const keep = chromium.provider.setBookmarks.bind(chromium.provider);
-    chromium.provider.setBookmarks = (bookmarks: Bookmark[]) =>
-      keep(
-        bookmarks.map((container) => ({
-          ...container,
-          children: (container.children ?? []).filter((node) => node.url !== SEPARATOR_URL),
-        })),
-      );
+    // The user removes the separator. Nothing may put it back.
+    firefox.provider.roots.set(BookmarkContainer.Toolbar, [{ title: 'X', url: 'https://x.org/' }]);
+    expect(await firefox.engine.isDirty()).toBe(true);
+    expect(await firefox.engine.sync()).toBe('pushed');
 
-    await chromium.engine.forcePull();
-    expect(await chromium.engine.isDirty()).toBe(false);
-    expect(await chromium.engine.sync()).toBe('idle');
+    const { decryptData } = await import('../crypto/crypto');
+    const uploaded = deserializeBookmarks(await decryptData(service.bookmarks, passwordHash));
+    const toolbar = uploaded.find((c) => c.title === BookmarkContainer.Toolbar);
+    expect(stripIds(toolbar?.children ?? [])).toEqual([{ title: 'X', url: 'https://x.org/' }]);
+    expect(await firefox.engine.sync()).toBe('idle');
   });
 });

@@ -4,9 +4,12 @@ import {
   type Bookmark,
   canonicalizeBookmarks,
   deserializeBookmarks,
-  restoreMissingContainers,
   serializeBookmarks,
 } from '../bookmarks/bookmark.js';
+import {
+  restoreMissingContainers,
+  restoreMissingSeparators,
+} from '../bookmarks/restore.js';
 import {
   acceptBookmarkTree,
   acceptBookmarkTreeWithReport,
@@ -453,10 +456,15 @@ export class SyncEngine {
    * Every read of the local tree goes through here so the same policy applies to both
    * sides of a comparison. Sanitising only the remote tree would leave local and cached
    * permanently unequal, and {@link isDirty} compares them — the tree would look edited
-   * on every check and sync in a loop. Restoring the missing containers is the same
-   * argument one level up: a browser with no bookmarks menu reads a tree with no
-   * `[xbs] Menu`, and without this it would look edited against every tree a browser
-   * that has one wrote (see {@link restoreMissingContainers}).
+   * on every check and sync in a loop. Restoring what the browser cannot hold is the
+   * same argument one level up: a browser with no bookmarks menu reads a tree with no
+   * `[xbs] Menu`, and one with no separators reads a tree with none of those, and
+   * without this either would look edited against every tree a browser that has them
+   * wrote — then delete them from the sync on its next upload (see ../bookmarks/restore).
+   *
+   * Separators are restored only where the provider says this browser cannot hold one.
+   * Where it can, its tree is the truth: restoring into it would put back the separator
+   * the user just deleted, on the very next read.
    *
    * `reference` is the tree the sync last held; it defaults to the cached one, and
    * callers that have just applied a remote tree pass that instead, since the cache is
@@ -464,7 +472,11 @@ export class SyncEngine {
    */
   private async localBookmarks(reference?: readonly Bookmark[]): Promise<Bookmark[]> {
     const local = (await this.readLocal()).bookmarks;
-    return restoreMissingContainers(local, reference ?? (await this.cachedBookmarks()));
+    const from = reference ?? (await this.cachedBookmarks());
+    const restored = restoreMissingContainers(local, from);
+    return (this.provider.holdsSeparators ?? true)
+      ? restored
+      : restoreMissingSeparators(restored, from);
   }
 
   /** The last-synced tree, as a tree; empty when nothing has been synced yet. */

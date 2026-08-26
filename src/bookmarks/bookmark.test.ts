@@ -14,7 +14,6 @@ import {
   getContainer,
   nativeToBookmarks,
   newBookmark,
-  restoreMissingContainers,
   SEPARATOR_URL,
   serializeBookmarks,
   stripIds,
@@ -201,44 +200,5 @@ describe('canonicalizeBookmarks / stripIds', () => {
   it('stripIds removes ids recursively', () => {
     const tree: Bookmark[] = [{ title: 'A', id: 1, children: [{ url: 'https://x.org', id: 2 }] }];
     expect(stripIds(tree)).toEqual([{ title: 'A', children: [{ url: 'https://x.org' }] }]);
-  });
-});
-
-describe('restoreMissingContainers', () => {
-  const toolbar: Bookmark = {
-    title: BookmarkContainer.Toolbar,
-    children: [{ title: 'X', url: 'https://x.org' }],
-  };
-  const menu: Bookmark = {
-    title: BookmarkContainer.Menu,
-    children: [{ title: 'M', url: 'https://m.org' }],
-  };
-  const other: Bookmark = { title: BookmarkContainer.Other, children: [] };
-
-  it('carries a container the local tree has no root for, at its reference position', () => {
-    expect(restoreMissingContainers([toolbar, other], [toolbar, menu, other])).toEqual([
-      toolbar,
-      menu,
-      other,
-    ]);
-  });
-
-  it('leaves a tree that already has every container untouched', () => {
-    const local = [toolbar, menu, other];
-    expect(restoreMissingContainers(local, [other, toolbar, menu])).toEqual(local);
-  });
-
-  it('keeps the local container, not the reference one, when both have it', () => {
-    const edited: Bookmark = { title: BookmarkContainer.Toolbar, children: [] };
-    expect(restoreMissingContainers([edited], [toolbar])).toEqual([edited]);
-  });
-
-  it('restores nothing from an empty reference', () => {
-    expect(restoreMissingContainers([toolbar], [])).toEqual([toolbar]);
-  });
-
-  it('ignores non-container nodes in the reference', () => {
-    const stray: Bookmark = { title: 'Not a container', children: [] };
-    expect(restoreMissingContainers([toolbar], [stray, menu])).toEqual([toolbar, menu]);
   });
 });
