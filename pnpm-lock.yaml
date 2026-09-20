@@ -5,10 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  brace-expansion: '>=2.1.3'
-  postcss: '>=8.5.18'
   js-yaml: ^4.3.2
-  nanoid: ^3.3.18
 
 importers:
 
@@ -286,16 +283,14 @@ packages:
   ast-v8-to-istanbul@1.0.6:
     resolution: {integrity: sha512-fvpl29helSO2w/z7utIbrkNXILdrLwDwAMH2I/zPKlGf5244+gf+B4cyS1sANcrPY2h+hWCGSgC8N61s/+AF9A==}
 
-  balanced-match@4.0.4:
-    resolution: {integrity: sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==}
-    engines: {node: 18 || 20 || >=22}
+  balanced-match@1.0.2:
+    resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
 
   base64-js@1.5.1:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
 
-  brace-expansion@5.0.9:
-    resolution: {integrity: sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==}
-    engines: {node: 20 || >=22}
+  brace-expansion@2.1.7:
+    resolution: {integrity: sha512-uZbew1NqdmPDTMJ8ah1y+b+9QEJrfkXFk3RcTQw3X0jW/xRUvFKsg1CfQdSYGdTbXZWExtU3J3ccxtnfw1Fi0g==}
 
   buffer@6.0.3:
     resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
@@ -995,13 +990,13 @@ snapshots:
       estree-walker: 3.0.3
       js-tokens: 10.0.0
 
-  balanced-match@4.0.4: {}
+  balanced-match@1.0.2: {}
 
   base64-js@1.5.1: {}
 
-  brace-expansion@5.0.9:
+  brace-expansion@2.1.7:
     dependencies:
-      balanced-match: 4.0.4
+      balanced-match: 1.0.2
 
   buffer@6.0.3:
     dependencies:
@@ -1164,7 +1159,7 @@ snapshots:
 
   minimatch@5.1.9:
     dependencies:
-      brace-expansion: 5.0.9
+      brace-expansion: 2.1.7
 
   ms@2.1.3: {}
 
