@@ -1,0 +1,30 @@
+version: 2
+
+# No `registries:` block here on purpose. This repo publishes to GitHub Packages but
+# consumes nothing from it: every dependency (lzutf8, openapi-fetch, qrcode, and the dev
+# toolchain) comes from the public registry. Adding a registry block would mean naming a
+# secret, and a Dependabot secret that does not exist fails the run it is attached to, so
+# the correct configuration for this repo is the absence of one. If a private dependency
+# is ever added, copy the block from app-next or pwa.
+updates:
+  # The "npm" ecosystem also drives pnpm lockfiles.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    # Wait 4 days after a release before proposing it, so a freshly published (possibly
+    # compromised) version has time to be caught first. Unlike app-next this is not
+    # mirroring a pnpm-side `minimumReleaseAge`: there is none in pnpm-workspace.yaml
+    # here, so this cooldown is the only release-age gate this repo has.
+    cooldown:
+      default-days: 4
+    groups:
+      dev-dependencies:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 4

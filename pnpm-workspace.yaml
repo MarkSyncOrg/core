@@ -1,20 +1,22 @@
 # pnpm 11 reads settings from here rather than the "pnpm" field in package.json.
-#
-# Every advisory below is build-time only: these packages reach the tree through
-# devDependencies (openapi-typescript, vitest) and never ship, since `files` publishes
-# only dist + openapi. Pinned anyway so `pnpm audit` stays quiet and a future *runtime*
-# advisory is not lost among known-benign noise.
-# js-yaml and nanoid are held to their current major on purpose: an open range would let
-# pnpm resolve the newest release of any major, and js-yaml 5 removed the `types.merge`
-# export that @redocly/openapi-core reads off the v4 default — which breaks `pnpm gen:api`
-# outright. A caret keeps the fix without the break.
-overrides:
-  brace-expansion: '>=2.1.3'  # GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg (DoS)
-  postcss: '>=8.5.18'         # GHSA-7fh5-64p2-3v2j (source-map path traversal)
-  js-yaml: ^4.3.1             # GHSA-h67p-54hq-rp68 + two later merge-key/omap DoS advisories
-  nanoid: ^3.3.18             # GHSA-2v37-7h3g-55p8 (custom generators can loop forever)
 
-# The js-yaml entry above replaces a "deliberately not overridden" note that no longer
-# holds. When it was written the only fixed release was in 5.x, so pinning meant choosing
-# between the advisory and a working `pnpm gen:api`. 4.2.0, 4.3.0 and 4.3.1 have shipped
-# since, and 4.3.1 clears all three advisories inside the major the build needs.
+# One override, and it is load-bearing. @redocly/openapi-core (pulled in by
+# openapi-typescript, which is the only thing that reads it) depends on js-yaml at the
+# exact version 4.1.1, and 4.1.1 carries four advisories: GHSA-h67p-54hq-rp68 plus three
+# later merge-key/omap CPU-exhaustion ones, the newest being GHSA-2883-xcg3-v3hh. No
+# amount of keeping the direct dependencies current reaches it, because the pin is exact
+# and openapi-typescript 7.13.0 (the latest) asks for @redocly/openapi-core ^1.34.6, so
+# the 2.x line that moved to js-yaml 5 is out of range.
+#
+# The `^` cap is not caution, it is a build requirement, re-tested rather than inherited:
+# with `js-yaml: ">=4.3.2"` pnpm resolves 5.x and `pnpm gen:api` dies in
+# @redocly/openapi-core/lib/utils.js, which reads `types.merge` off the v4 default export.
+# 4.3.2 is the newest 4.x and clears all four advisories.
+#
+# The brace-expansion, postcss and nanoid overrides that used to sit here are gone. They
+# were pinning transitive dependencies of an older vitest; on vitest 5 the tree resolves
+# to patched versions on its own, and `pnpm audit` with no overrides at all reports
+# nothing but the js-yaml chain above. Re-check with an empty block before adding a new
+# pin: an override that is no longer needed is one more thing to keep current by hand.
+overrides:
+  js-yaml: ^4.3.2
