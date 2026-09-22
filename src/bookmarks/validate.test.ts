@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Bookmark } from './bookmark';
 import {
+  isSafeBookmarkUrl,
+  isSyncableBookmarkUrl,
   reinstateRemovedBookmarks,
   sanitizeBookmarkTree,
   sanitizeBookmarkTreeWithReport,
@@ -137,5 +139,85 @@ describe('reinstateRemovedBookmarks', () => {
   it('returns the tree as-is when nothing was removed', () => {
     const target: Bookmark[] = [{ title: 'Toolbar', children: [] }];
     expect(reinstateRemovedBookmarks(target, [])).toBe(target);
+  });
+});
+
+describe('isSyncableBookmarkUrl', () => {
+  // The bug this pins: these are the schemes xBrowserSync carried and MarkSync dropped
+  // (MarkSyncOrg/app-next#37). None of them executes anything in the origin that holds it.
+  it.each([
+    'chrome://bookmarks/',
+    'edge://settings/profiles',
+    'brave://settings/',
+    'vivaldi://history',
+    'opera://about',
+    'about:config',
+    'file:///home/user/notes.html',
+    'chrome-extension://abcdefghijklmnopabcdefghijklmnop/options.html',
+    'moz-extension://11111111-2222-3333-4444-555555555555/options.html',
+    'https://example.org/',
+    'mailto:someone@example.org',
+    'xbs:separator',
+  ])('carries %j', (url) => {
+    expect(isSyncableBookmarkUrl(url)).toBe(true);
+  });
+
+  it.each(['javascript:void(0)', 'JavaScript:alert(1)', 'data:text/html,<b>x</b>'])(
+    'holds back %j unless the user opts in',
+    (url) => {
+      expect(isSyncableBookmarkUrl(url)).toBe(false);
+      expect(isSyncableBookmarkUrl(url, { allowBookmarklets: true })).toBe(true);
+    },
+  );
+
+  it.each(['', 'not a url', '/relative/path', 'example.org'])(
+    'refuses %j, which no browser produces',
+    (url) => {
+      expect(isSyncableBookmarkUrl(url)).toBe(false);
+      expect(isSyncableBookmarkUrl(url, { allowBookmarklets: true })).toBe(false);
+    },
+  );
+
+  it('treats a folder (no URL) as syncable', () => {
+    expect(isSyncableBookmarkUrl(undefined)).toBe(true);
+  });
+
+  it('stays wider than the render guard, which the opt-in never widens', () => {
+    expect(isSafeBookmarkUrl('chrome://bookmarks/')).toBe(false);
+    expect(isSafeBookmarkUrl('file:///etc/hosts')).toBe(false);
+    expect(isSafeBookmarkUrl('javascript:void(0)')).toBe(false);
+  });
+});
+
+describe('sanitizeBookmarkTree scheme policy', () => {
+  const tree: Bookmark[] = [
+    {
+      title: 'Toolbar',
+      children: [
+        { title: 'page', url: 'https://x.org/' },
+        { title: 'internals', url: 'chrome://bookmarks/' },
+        { title: 'local file', url: 'file:///home/user/notes.html' },
+        { title: 'let', url: BOOKMARKLET },
+      ],
+    },
+  ];
+
+  it('keeps local and browser-internal bookmarks', () => {
+    const urls = sanitizeBookmarkTree(tree)[0]!.children!.map((node) => node.url);
+    expect(urls).toEqual(['https://x.org/', 'chrome://bookmarks/', 'file:///home/user/notes.html']);
+  });
+
+  it('reports only the bookmarklet as removed', () => {
+    expect(sanitizeBookmarkTreeWithReport(tree).removed).toEqual([
+      { bookmark: { title: 'let', url: BOOKMARKLET }, path: ['Toolbar'], index: 3 },
+    ]);
+  });
+
+  it('keeps the bookmarklet too once the user opts in', () => {
+    const { bookmarks, removed } = sanitizeBookmarkTreeWithReport(tree, {
+      allowBookmarklets: true,
+    });
+    expect(removed).toEqual([]);
+    expect(bookmarks[0]!.children!.map((node) => node.url)).toContain(BOOKMARKLET);
   });
 });

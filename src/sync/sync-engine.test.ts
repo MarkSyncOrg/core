@@ -676,6 +676,201 @@ describe('SyncEngine local bookmarklets', () => {
   });
 });
 
+describe('SyncEngine local and browser-scheme bookmarks', () => {
+  // MarkSyncOrg/app-next#37: these used to be filtered out of every upload, so a
+  // `chrome://` or `file://` bookmark never reached the user's other devices.
+  const localWithBrowserSchemes: Bookmark[] = [
+    {
+      title: BookmarkContainer.Toolbar,
+      children: [
+        { title: 'X', url: 'https://x.org' },
+        { title: 'Bookmarks', url: 'chrome://bookmarks/' },
+        { title: 'Notes', url: 'file:///home/user/notes.html' },
+      ],
+    },
+  ];
+
+  it('uploads them like any other bookmark', async () => {
+    const uploaded: string[] = [];
+    const api = fakeApi({
+      updateSync: vi.fn(async (_syncId: string, bookmarks: string) => {
+        uploaded.push(bookmarks);
+        return 'T1';
+      }),
+    });
+    const { provider, engine } = buildEngine(api);
+    provider.bookmarks = structuredClone(localWithBrowserSchemes);
+
+    await engine.enableNewSync(SERVICE_URL, 'pw');
+
+    const { decryptData } = await import('../crypto/crypto');
+    const sent = deserializeBookmarks(
+      await decryptData(uploaded[0]!, await getPasswordHash('pw', SYNC_ID)),
+    );
+    expect(stripIds(sent)).toEqual(localWithBrowserSchemes);
+  });
+
+  it('writes them to the browser when they arrive from the service', async () => {
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: await encryptData(
+          serializeBookmarks(localWithBrowserSchemes),
+          await getPasswordHash('pw', SYNC_ID),
+        ),
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+    });
+    const { store, provider, engine } = buildEngine(api);
+    await store.setSyncInfo({
+      serviceUrl: SERVICE_URL,
+      syncId: SYNC_ID,
+      passwordHash: await getPasswordHash('pw', SYNC_ID),
+    });
+    await store.setSyncEnabled(true);
+    await store.setLastUpdated('T1');
+
+    expect(await engine.pull()).toBe(true);
+
+    expect(provider.bookmarks).toEqual(localWithBrowserSchemes);
+    expect(await engine.isDirty()).toBe(false);
+  });
+});
+
+describe('SyncEngine syncBookmarklets setting', () => {
+  const BOOKMARKLET = 'javascript:void(0)';
+  const localWithBookmarklet: Bookmark[] = [
+    {
+      title: BookmarkContainer.Toolbar,
+      children: [
+        { title: 'X', url: 'https://x.org' },
+        { title: 'Let', url: BOOKMARKLET },
+      ],
+    },
+  ];
+
+  /** Enables a new sync with the setting on, returning what the service was sent. */
+  async function uploadWith(syncBookmarklets: boolean): Promise<Bookmark[]> {
+    const uploaded: string[] = [];
+    const api = fakeApi({
+      updateSync: vi.fn(async (_syncId: string, bookmarks: string) => {
+        uploaded.push(bookmarks);
+        return 'T1';
+      }),
+    });
+    const { store, provider, engine } = buildEngine(api);
+    await store.setSettings({ syncBookmarklets });
+    provider.bookmarks = structuredClone(localWithBookmarklet);
+
+    await engine.enableNewSync(SERVICE_URL, 'pw');
+
+    const { decryptData } = await import('../crypto/crypto');
+    return stripIds(
+      deserializeBookmarks(await decryptData(uploaded[0]!, await getPasswordHash('pw', SYNC_ID))),
+    );
+  }
+
+  it('leaves bookmarklets out of the upload by default', async () => {
+    expect(await uploadWith(false)).toEqual([
+      { title: BookmarkContainer.Toolbar, children: [{ title: 'X', url: 'https://x.org' }] },
+    ]);
+  });
+
+  it('uploads them once the user opts in', async () => {
+    expect(await uploadWith(true)).toEqual(localWithBookmarklet);
+  });
+
+  it('applies a remote bookmarklet to the browser when opted in', async () => {
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: await encryptData(
+          serializeBookmarks(localWithBookmarklet),
+          await getPasswordHash('pw', SYNC_ID),
+        ),
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+    });
+    const { store, provider, engine } = buildEngine(api);
+    await store.setSettings({ syncBookmarklets: true });
+    await store.setSyncInfo({
+      serviceUrl: SERVICE_URL,
+      syncId: SYNC_ID,
+      passwordHash: await getPasswordHash('pw', SYNC_ID),
+    });
+    await store.setSyncEnabled(true);
+    await store.setLastUpdated('T1');
+    provider.bookmarks = [{ title: BookmarkContainer.Toolbar, children: [] }];
+
+    expect(await engine.pull()).toBe(true);
+
+    expect(provider.bookmarks).toEqual(localWithBookmarklet);
+  });
+
+  it('drops a remote bookmarklet again when the device has not opted in', async () => {
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => 'T2'),
+      getSync: vi.fn(async () => ({
+        bookmarks: await encryptData(
+          serializeBookmarks(localWithBookmarklet),
+          await getPasswordHash('pw', SYNC_ID),
+        ),
+        version: APP_VERSION,
+        lastUpdated: 'T2',
+      })),
+    });
+    const { store, provider, engine } = buildEngine(api);
+    await store.setSyncInfo({
+      serviceUrl: SERVICE_URL,
+      syncId: SYNC_ID,
+      passwordHash: await getPasswordHash('pw', SYNC_ID),
+    });
+    await store.setSyncEnabled(true);
+    await store.setLastUpdated('T1');
+    provider.bookmarks = [{ title: BookmarkContainer.Toolbar, children: [] }];
+
+    await engine.pull();
+
+    expect(provider.bookmarks).toEqual([
+      { title: BookmarkContainer.Toolbar, children: [{ title: 'X', url: 'https://x.org' }] },
+    ]);
+  });
+
+  it('pushes the bookmarklet it had been holding back when the user turns it on', async () => {
+    const uploaded: string[] = [];
+    // The service's timestamp follows the uploads, so the sync below sees a remote that
+    // only this device has changed: the push path, not the merge one.
+    let serverLastUpdated = 'T0';
+    const api = fakeApi({
+      getLastUpdated: vi.fn(async () => serverLastUpdated),
+      updateSync: vi.fn(async (_syncId: string, bookmarks: string) => {
+        uploaded.push(bookmarks);
+        serverLastUpdated = `T${uploaded.length}`;
+        return serverLastUpdated;
+      }),
+    });
+    const { store, provider, engine } = buildEngine(api);
+    provider.bookmarks = structuredClone(localWithBookmarklet);
+    await engine.enableNewSync(SERVICE_URL, 'pw');
+    expect(await engine.isDirty()).toBe(false);
+
+    await store.setSettings({ syncBookmarklets: true });
+
+    // The tree the device is willing to carry changed, so it has something to send.
+    expect(await engine.isDirty()).toBe(true);
+    expect(await engine.sync()).toBe('pushed');
+    const { decryptData } = await import('../crypto/crypto');
+    const sent = stripIds(
+      deserializeBookmarks(
+        await decryptData(uploaded[uploaded.length - 1]!, await getPasswordHash('pw', SYNC_ID)),
+      ),
+    );
+    expect(sent).toEqual(localWithBookmarklet);
+  });
+});
+
 describe('SyncEngine one-way sync direction', () => {
   const remoteTree: Bookmark[] = [
     { title: BookmarkContainer.Toolbar, children: [{ title: 'R', url: 'https://r.org' }] },

@@ -61,14 +61,23 @@ export {
 } from './bookmarks/metadata.js';
 
 // Bookmark validation / sanitisation (trust-boundary helpers).
-// `isSafeBookmarkUrl` is also the render-time guard consumers should use before turning
-// a bookmark into an <a href> or navigating to it.
+//
+// Two different questions, two different guards:
+//   - `isSyncableBookmarkUrl` — may this be stored, synced and written to the browser?
+//   - `isSafeBookmarkUrl`     — may this become an <a href> or a navigation?
+// The second is the render-time guard consumers must use before turning a bookmark into
+// a link; it stays narrow even for the URLs the sync happily carries (`chrome://`, `file://`).
 export {
   MAX_BOOKMARK_DEPTH,
   SAFE_URL_SCHEMES,
+  LOCAL_URL_SCHEMES,
+  SYNCABLE_URL_SCHEMES,
+  EXECUTABLE_URL_SCHEMES,
+  type BookmarkUrlPolicy,
   type RemovedBookmark,
   type SanitizeResult,
   isSafeBookmarkUrl,
+  isSyncableBookmarkUrl,
   validateBookmarkTree,
   sanitizeBookmarkTree,
   sanitizeBookmarkTreeWithReport,

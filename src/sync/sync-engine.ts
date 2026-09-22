@@ -13,6 +13,7 @@ import {
 import {
   acceptBookmarkTree,
   acceptBookmarkTreeWithReport,
+  type BookmarkUrlPolicy,
   reinstateRemovedBookmarks,
   type SanitizeResult,
   sanitizeBookmarkTree,
@@ -359,8 +360,9 @@ export class SyncEngine {
    * local apply refreshes the cache, so a later auto-pull does not mistake the restore
    * for an un-pushed local edit. Callers must serialise this against other sync work.
    *
-   * Unlike a pull, this replaces the local tree wholesale: nodes with unsafe URLs are not
-   * carried over, because the user asked for these bookmarks and not the current ones.
+   * Unlike a pull, this replaces the local tree wholesale: nodes this device will not
+   * carry (see `syncBookmarklets`) are not preserved, because the user asked for these
+   * bookmarks and not the current ones.
    * Use `acceptBookmarkTreeWithReport` on the backup if you want to tell them what the
    * restored file itself lost to sanitisation.
    *
@@ -371,7 +373,7 @@ export class SyncEngine {
   async restore(bookmarks: Bookmark[]): Promise<void> {
     // Restored trees usually come from a backup file, so validate here too rather than
     // trusting the caller to have done it.
-    const restored = acceptBookmarkTree(bookmarks);
+    const restored = acceptBookmarkTree(bookmarks, await this.urlPolicy());
     if (await this.store.isSyncEnabled()) {
       // applyRemote refreshes the cache; push then uploads the restored tree.
       await this.applyRemote(restored, false);
@@ -424,6 +426,18 @@ export class SyncEngine {
   }
 
   /**
+   * What this device is willing to carry, from settings.
+   *
+   * Read on every tree that crosses the boundary rather than cached, so turning
+   * bookmarklets on or off takes effect on the next sync instead of the next restart.
+   * Both sides of every comparison go through the same value within one operation, which
+   * is what keeps {@link isDirty} from seeing a difference the policy itself created.
+   */
+  private async urlPolicy(): Promise<BookmarkUrlPolicy> {
+    return { allowBookmarklets: (await this.store.getSettings()).syncBookmarklets };
+  }
+
+  /**
    * Throws unless this device is allowed to move bookmarks the given way. The message
    * names the setting, because the only fix is for the user to change it.
    */
@@ -450,8 +464,9 @@ export class SyncEngine {
   }
 
   /**
-   * The browser's current bookmarks, validated, stripped of unsafe-URL nodes, and with
-   * the containers this device cannot hold carried over from `reference`.
+   * The browser's current bookmarks, validated, stripped of the nodes this device will
+   * not carry, and with the containers this device cannot hold carried over from
+   * `reference`.
    *
    * Every read of the local tree goes through here so the same policy applies to both
    * sides of a comparison. Sanitising only the remote tree would leave local and cached
@@ -487,11 +502,12 @@ export class SyncEngine {
 
   /**
    * The browser's current bookmarks, split into the tree the sync works with and the
-   * unsafe-URL nodes held back from it. {@link applyRemote} needs the second half: those
-   * nodes exist only in the browser, so a destructive write has to put them back.
+   * nodes held back from it (bookmarklets, unless the user opted in; anything whose URL
+   * is not absolute). {@link applyRemote} needs the second half: those nodes exist only
+   * in the browser, so a destructive write has to put them back.
    */
   private async readLocal(): Promise<SanitizeResult> {
-    return acceptBookmarkTreeWithReport(await this.provider.getBookmarks());
+    return acceptBookmarkTreeWithReport(await this.provider.getBookmarks(), await this.urlPolicy());
   }
 
   /** Encrypts and uploads the browser's current bookmarks, updating the cache. */
@@ -515,7 +531,9 @@ export class SyncEngine {
    * `setBookmarks` is a destructive full-tree write and the tree being written has been
    * sanitised, so a bookmarklet the user keeps in the browser would be erased by it — the
    * sync excludes such nodes, which is not the same as deleting them. They are put back
-   * before the write, at the position they held locally.
+   * before the write, at the position they held locally. With the `syncBookmarklets`
+   * setting on nothing is excluded in the first place, so there is nothing to put back
+   * and the merge decides their fate like any other node's.
    *
    * The cache stores the tree *without* them, so it still mirrors what the service holds
    * and {@link isDirty} keeps comparing two sanitised trees.
@@ -550,7 +568,7 @@ export class SyncEngine {
     }
     // Validation failures stay outside the catch above: a malformed tree is not a wrong
     // password, and reporting it as one would send users chasing their credentials.
-    return json ? sanitizeBookmarkTree(deserializeBookmarks(json)) : [];
+    return json ? sanitizeBookmarkTree(deserializeBookmarks(json), await this.urlPolicy()) : [];
   }
 
   private async persist(info: SyncInfo, version: string, lastUpdated: string): Promise<void> {

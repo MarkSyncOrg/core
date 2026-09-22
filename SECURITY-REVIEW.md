@@ -301,7 +301,7 @@ through:
   and caps nesting at `MAX_BOOKMARK_DEPTH` (200). The walk is **iterative**, because a
   recursive validator would overflow on exactly the input it exists to reject. Unknown
   properties are tolerated so a newer client's fields do not make a tree unreadable.
-- `sanitizeBookmarkTree` — drops nodes whose URL is not in `SAFE_URL_SCHEMES`, together
+- `sanitizeBookmarkTree` — drops nodes whose URL the device will not carry, together
   with their subtrees. Scheme checks parse via `URL`, so `JavaScript:`, leading
   whitespace and embedded newlines normalise before comparison.
 - `acceptBookmarkTree` — both, and the entry point applied at `extractBookmarks`,
@@ -326,6 +326,16 @@ Two consequences worth recording:
   keeps holding the sanitised tree so dirty detection still compares like with like. The
   nodes are still never uploaded, and a restore — an explicit whole-tree replacement —
   still replaces them.
+
+- **Two policies, not one** (MarkSyncOrg/app-next#37, fixed after this review). The
+  original allowlist answered "may this be rendered as a link?" and was then used to
+  decide "may this be synced?". The two are now separate: `SYNCABLE_URL_SCHEMES` adds the
+  local and browser-internal schemes (`chrome:`, `edge:`, `about:`, `file:`, the
+  extension schemes), which execute nothing in the origin that holds them and which
+  browsers already refuse to navigate to from an ordinary page, while `SAFE_URL_SCHEMES`
+  and `isSafeBookmarkUrl` stay exactly as narrow as this finding made them. Only
+  `javascript:` and `data:` remain excluded from the sync, and only until the user turns
+  on `syncBookmarklets`; no setting widens the render guard.
 
 **Finding 4.** `normalizeServiceUrl` parses the URL, requires `https` (allowing `http`
 only for loopback, so self-hosting still works), and rejects embedded credentials and

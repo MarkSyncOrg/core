@@ -1,5 +1,9 @@
 import type { Bookmark } from '../bookmarks/bookmark.js';
-import { acceptBookmarkTreeWithReport, type SanitizeResult } from '../bookmarks/validate.js';
+import {
+  acceptBookmarkTreeWithReport,
+  type BookmarkUrlPolicy,
+  type SanitizeResult,
+} from '../bookmarks/validate.js';
 
 // Backup file format, compatible with the xBrowserSync ecosystem. The current shape
 // nests bookmarks under `xbrowsersync.data`; the legacy `xBrowserSync` shape is read
@@ -58,8 +62,8 @@ export function buildBackup(
  *
  * @throws {InvalidBookmarkDataError} if the bookmarks are not a well-formed tree.
  */
-export function extractBookmarks(backup: Backup): Bookmark[] {
-  return extractBookmarksWithReport(backup).bookmarks;
+export function extractBookmarks(backup: Backup, policy: BookmarkUrlPolicy = {}): Bookmark[] {
+  return extractBookmarksWithReport(backup, policy).bookmarks;
 }
 
 /**
@@ -67,17 +71,21 @@ export function extractBookmarks(backup: Backup): Bookmark[] {
  *
  * A restore is destructive, and the dropped entries are not recoverable from the returned
  * tree — read them here to tell the user what the file contained that will not come back.
+ * Pass the device's URL policy so a user who syncs bookmarklets restores them too.
  *
  * @throws {InvalidBookmarkDataError} if the bookmarks are not a well-formed tree.
  */
-export function extractBookmarksWithReport(backup: Backup): SanitizeResult {
+export function extractBookmarksWithReport(
+  backup: Backup,
+  policy: BookmarkUrlPolicy = {},
+): SanitizeResult {
   const current = backup.xbrowsersync?.data?.bookmarks;
   if (current !== undefined) {
-    return acceptBookmarkTreeWithReport(current);
+    return acceptBookmarkTreeWithReport(current, policy);
   }
   const legacy = backup.xBrowserSync?.bookmarks;
   if (legacy !== undefined) {
-    return acceptBookmarkTreeWithReport(legacy);
+    return acceptBookmarkTreeWithReport(legacy, policy);
   }
   throw new Error('Unrecognised backup file');
 }
@@ -86,7 +94,8 @@ export function extractBookmarksWithReport(backup: Backup): SanitizeResult {
  * Parses backup JSON text into a Backup, validating the shape.
  *
  * Note this returns the parsed container as-is; use {@link extractBookmarks} to obtain
- * the validated, sanitised bookmark tree.
+ * the validated, sanitised bookmark tree. No URL policy is taken here: this only proves
+ * the file is a well-formed backup, and which URLs survive is the extraction's decision.
  */
 export function parseBackup(json: string): Backup {
   const parsed: unknown = JSON.parse(json);

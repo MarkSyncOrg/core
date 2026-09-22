@@ -10,6 +10,12 @@
 //
 // This constrains only what the client *accepts*. The wire format is unchanged, so the
 // xBrowserSync compatibility contract documented in bookmark.ts and crypto.ts is intact.
+//
+// Two questions are asked of a URL here, and they have different answers:
+//   - may it be stored, synced and written back to the browser? `isSyncableBookmarkUrl`
+//   - may it become an <a href> or a navigation?              `isSafeBookmarkUrl`
+// Conflating them is what made `chrome://`, `file://` and friends disappear from the
+// sync (MarkSyncOrg/app-next#37): they are unrenderable, not unsafe.
 
 import { InvalidBookmarkDataError } from '../errors.js';
 import { type Bookmark, SEPARATOR_URL } from './bookmark.js';
@@ -25,9 +31,16 @@ import { type Bookmark, SEPARATOR_URL } from './bookmark.js';
 export const MAX_BOOKMARK_DEPTH = 200;
 
 /**
- * URL schemes a synced bookmark may carry. Deliberately excludes `javascript:` and
- * `data:`, which execute in the opening context: a consumer rendering an untrusted
- * bookmark as `<a href>` would otherwise hand script execution to whoever wrote it.
+ * URL schemes safe to hand to a renderer or a navigation.
+ *
+ * Deliberately excludes `javascript:` and `data:`, which execute in the opening context:
+ * a consumer rendering an untrusted bookmark as `<a href>` would otherwise hand script
+ * execution to whoever wrote it. It also excludes the local and browser-internal schemes
+ * in {@link LOCAL_URL_SCHEMES}: those carry no execution risk, but a page cannot usefully
+ * link to them, so a consumer asking "can I turn this into a link?" wants them out too.
+ *
+ * This is the *render* policy. What a bookmark may be stored and synced as is a wider
+ * question with a different answer: see {@link SYNCABLE_URL_SCHEMES}.
  */
 export const SAFE_URL_SCHEMES: readonly string[] = [
   'http:',
@@ -38,27 +51,114 @@ export const SAFE_URL_SCHEMES: readonly string[] = [
 ];
 
 /**
- * Whether a bookmark URL is safe to store, sync and render.
+ * Local and browser-internal schemes: syncable, but not renderable as a link.
  *
- * Folders (no URL) and the separator sentinel are safe by definition. Everything else
- * must parse as an absolute URL with an allowed scheme. Parsing via `URL` rather than a
- * regex is what makes obfuscation (`JAVASCRIPT:`, leading whitespace, embedded newlines)
- * a non-issue — the parser normalises before the scheme is compared.
+ * `chrome://`, `edge://`, `about:` and friends address pages inside the browser, and
+ * `file://` addresses the user's disk. None of them executes script in the origin that
+ * renders them, and browsers already refuse to navigate to them from an ordinary page,
+ * so excluding them from the sync protected nobody: it just silently dropped bookmarks
+ * the user had, which xBrowserSync carried (MarkSyncOrg/app-next#37).
+ *
+ * `chrome-extension:` / `moz-extension:` URLs address a specific extension in a specific
+ * profile, so they rarely resolve on the device that receives them. They are carried
+ * anyway: a bookmark that does not resolve is the user's business, losing it is ours.
+ */
+export const LOCAL_URL_SCHEMES: readonly string[] = [
+  'about:',
+  'file:',
+  'chrome:',
+  'chrome-extension:',
+  'edge:',
+  'brave:',
+  'vivaldi:',
+  'opera:',
+  'moz-extension:',
+  'safari-web-extension:',
+];
+
+/**
+ * Schemes that execute whatever the URL carries, in the context that opens it.
+ *
+ * `javascript:` is how every browser stores a bookmarklet, and `data:text/html` is the
+ * same class of problem in a different costume. They are excluded from the sync unless
+ * the user opts in (`allowBookmarklets`), because a tree arriving from a backup file or
+ * from anyone sharing the sync would otherwise be able to plant one in the bookmark bar.
+ * They are never safe to render: {@link isSafeBookmarkUrl} keeps rejecting them whatever
+ * the policy says.
+ */
+export const EXECUTABLE_URL_SCHEMES: readonly string[] = ['javascript:', 'data:'];
+
+/** Schemes a bookmark may be stored and synced as, before any opt-in is applied. */
+export const SYNCABLE_URL_SCHEMES: readonly string[] = [
+  ...SAFE_URL_SCHEMES,
+  ...LOCAL_URL_SCHEMES,
+];
+
+/** What the user has allowed into the sync beyond the default set. */
+export interface BookmarkUrlPolicy {
+  /**
+   * Carry bookmarklets (`javascript:`) and `data:` entries as well. Off by default: it
+   * lets anyone who can write the sync, or hand over a backup file, put an executable
+   * URL into the browser's bookmark bar. Consumers that turn it on must keep using
+   * {@link isSafeBookmarkUrl} before rendering or opening a bookmark.
+   */
+  allowBookmarklets?: boolean;
+}
+
+/** Parses `url` and returns its lowercased scheme, or undefined if it is not absolute. */
+function schemeOf(url: string): string | undefined {
+  try {
+    // Parsing via `URL` rather than a regex is what makes obfuscation (`JAVASCRIPT:`,
+    // leading whitespace, embedded newlines) a non-issue: the parser normalises first.
+    return new URL(url).protocol.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a bookmark URL is safe to render as an `<a href>` or to navigate to.
+ *
+ * Folders (no URL) and the separator sentinel are safe by definition; everything else
+ * must parse as an absolute URL whose scheme is in {@link SAFE_URL_SCHEMES}. This is the
+ * render-time guard `SECURITY.md` asks consumers for, and it is deliberately narrower
+ * than what the sync carries: a synced `chrome://` bookmark is real data, but a page
+ * still cannot link to it.
  */
 export function isSafeBookmarkUrl(url: string | undefined): boolean {
-  if (url === undefined) {
+  if (url === undefined || url === SEPARATOR_URL) {
     return true;
   }
-  if (url === SEPARATOR_URL) {
+  const scheme = schemeOf(url);
+  return scheme !== undefined && SAFE_URL_SCHEMES.includes(scheme);
+}
+
+/**
+ * Whether a bookmark URL may be stored, synced and written back to the browser.
+ *
+ * Wider than {@link isSafeBookmarkUrl}: the sync's job is to carry what the user has,
+ * and the local and browser-internal schemes are not an execution risk. Only the schemes
+ * that execute ({@link EXECUTABLE_URL_SCHEMES}) are held back, and only until the user
+ * opts in via `policy.allowBookmarklets`.
+ *
+ * Anything that is not an absolute URL is still refused: a relative or malformed URL has
+ * no scheme to reason about, and no browser produces one.
+ */
+export function isSyncableBookmarkUrl(
+  url: string | undefined,
+  policy: BookmarkUrlPolicy = {},
+): boolean {
+  if (url === undefined || url === SEPARATOR_URL) {
     return true;
   }
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
+  const scheme = schemeOf(url);
+  if (scheme === undefined) {
     return false;
   }
-  return SAFE_URL_SCHEMES.includes(parsed.protocol.toLowerCase());
+  return (
+    SYNCABLE_URL_SCHEMES.includes(scheme) ||
+    (policy.allowBookmarklets === true && EXECUTABLE_URL_SCHEMES.includes(scheme))
+  );
 }
 
 function assertNodeShape(node: unknown): asserts node is Bookmark {
@@ -144,17 +244,22 @@ export interface SanitizeResult {
 }
 
 /**
- * Returns a copy of the tree with unsafe-URL nodes removed (with their subtrees).
+ * Returns a copy of the tree with non-syncable nodes removed (with their subtrees).
  *
- * Applied symmetrically to both local and remote trees by the sync engine. Filtering
- * only one side would leave the two permanently unequal, and dirty-detection compares
- * them — the tree would look edited on every check and sync in a loop.
+ * What counts as syncable is {@link isSyncableBookmarkUrl}, so the same `policy` must be
+ * passed everywhere a tree is sanitised. Applied symmetrically to both local and remote
+ * trees by the sync engine: filtering only one side would leave the two permanently
+ * unequal, and dirty-detection compares them — the tree would look edited on every check
+ * and sync in a loop.
  *
  * Expects a tree that already passed {@link validateBookmarkTree}; it recurses, relying
  * on that depth cap.
  */
-export function sanitizeBookmarkTree(bookmarks: Bookmark[]): Bookmark[] {
-  return sanitizeBookmarkTreeWithReport(bookmarks).bookmarks;
+export function sanitizeBookmarkTree(
+  bookmarks: Bookmark[],
+  policy: BookmarkUrlPolicy = {},
+): Bookmark[] {
+  return sanitizeBookmarkTreeWithReport(bookmarks, policy).bookmarks;
 }
 
 /**
@@ -167,13 +272,16 @@ export function sanitizeBookmarkTree(bookmarks: Bookmark[]): Bookmark[] {
  * Removals are reported in document order, and within one parent in ascending index
  * order, which is what makes the indices usable for re-insertion.
  */
-export function sanitizeBookmarkTreeWithReport(bookmarks: Bookmark[]): SanitizeResult {
+export function sanitizeBookmarkTreeWithReport(
+  bookmarks: Bookmark[],
+  policy: BookmarkUrlPolicy = {},
+): SanitizeResult {
   const removed: RemovedBookmark[] = [];
 
   const walk = (nodes: Bookmark[], path: readonly string[]): Bookmark[] => {
     const result: Bookmark[] = [];
     nodes.forEach((node, index) => {
-      if (!isSafeBookmarkUrl(node.url)) {
+      if (!isSyncableBookmarkUrl(node.url, policy)) {
         removed.push({ bookmark: node, path, index });
         return;
       }
@@ -246,11 +354,14 @@ export function reinstateRemovedBookmarks(
 }
 
 /** Validates then sanitises an untrusted tree — the standard trust-boundary entry point. */
-export function acceptBookmarkTree(value: unknown): Bookmark[] {
-  return sanitizeBookmarkTree(validateBookmarkTree(value));
+export function acceptBookmarkTree(value: unknown, policy: BookmarkUrlPolicy = {}): Bookmark[] {
+  return sanitizeBookmarkTree(validateBookmarkTree(value), policy);
 }
 
 /** {@link acceptBookmarkTree}, but also returning what sanitisation dropped. */
-export function acceptBookmarkTreeWithReport(value: unknown): SanitizeResult {
-  return sanitizeBookmarkTreeWithReport(validateBookmarkTree(value));
+export function acceptBookmarkTreeWithReport(
+  value: unknown,
+  policy: BookmarkUrlPolicy = {},
+): SanitizeResult {
+  return sanitizeBookmarkTreeWithReport(validateBookmarkTree(value), policy);
 }
