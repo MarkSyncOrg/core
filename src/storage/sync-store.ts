@@ -61,6 +61,15 @@ export interface Settings {
   syncOnChange: boolean;
   /** Which way bookmarks are allowed to flow on this device. */
   syncDirection: SyncDirection;
+  /**
+   * Carry bookmarklets (`javascript:`) and `data:` entries in the sync.
+   *
+   * Off by default, and it is a security decision rather than a taste one: anyone who
+   * can write the sync, or hand over a backup file, can put an executable URL in the
+   * bookmark bar of every device that has this on. Local bookmarklets are kept on the
+   * device either way, they are simply not uploaded while this is off.
+   */
+  syncBookmarklets: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -69,6 +78,7 @@ export const DEFAULT_SETTINGS: Settings = {
   syncBookmarksToolbar: true,
   syncOnChange: true,
   syncDirection: 'two-way',
+  syncBookmarklets: false,
 };
 
 /**

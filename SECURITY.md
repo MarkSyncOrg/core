@@ -7,11 +7,24 @@ application's responsibility. A full audit, including the fixed findings, is in
 
 ## 1. Check URLs before rendering or navigating
 
-The library filters unsafe URL schemes (`javascript:`, `data:`, …) out of every tree that
-crosses a trust boundary — backup files, decrypted sync payloads, and the local tree
-before it is uploaded or compared. The pure model constructors (`newBookmark`,
-`nativeToBookmarks`) deliberately do **not** filter, because the browser's own tree may
-legitimately contain bookmarklets the user created.
+Two different questions are asked of a bookmark URL, and they have different answers:
+
+- **May it be stored, synced and written to the browser?** `isSyncableBookmarkUrl`.
+  Accepts `http(s)`, `ftp(s)`, `mailto:` and the local and browser-internal schemes
+  (`chrome:`, `edge:`, `brave:`, `vivaldi:`, `opera:`, `about:`, `file:`,
+  `chrome-extension:`, `moz-extension:`, `safari-web-extension:`). `javascript:` and
+  `data:` only with `{ allowBookmarklets: true }`.
+- **May it become an `<a href>` or a navigation?** `isSafeBookmarkUrl`. Accepts
+  `http(s)`, `ftp(s)` and `mailto:` only, whatever the sync policy says.
+
+The library applies the first to every tree that crosses a trust boundary — backup files,
+decrypted sync payloads, and the local tree before it is uploaded or compared. The pure
+model constructors (`newBookmark`, `nativeToBookmarks`) deliberately do **not** filter,
+because the browser's own tree may legitimately contain bookmarklets the user created.
+
+A `chrome://` or `file://` bookmark is unrenderable, not unsafe: it carries no execution
+risk, so the sync carries it (`MarkSyncOrg/app-next#37`). Only `javascript:` and `data:`
+execute in the opening context, and those stay out of the sync unless the user opts in.
 
 So before turning a bookmark into a link or navigating to one:
 
@@ -23,8 +36,12 @@ if (isSafeBookmarkUrl(bookmark.url)) {
 }
 ```
 
+A URL the sync carries but this guard rejects is not an error to report: render it as
+inert text and say why, rather than hiding the entry or pretending it is broken.
+
 For any bookmark tree arriving from outside, run it through the trust-boundary helper
-first — it validates the shape, caps nesting depth, and drops unsafe URLs in one call:
+first — it validates the shape, caps nesting depth, and drops non-syncable URLs in one
+call:
 
 ```ts
 import { acceptBookmarkTree } from '@marksyncorg/core';
@@ -32,16 +49,31 @@ import { acceptBookmarkTree } from '@marksyncorg/core';
 const tree = acceptBookmarkTree(untrustedValue); // throws InvalidBookmarkDataError
 ```
 
+Every sanitising helper (`sanitizeBookmarkTree`, `sanitizeBookmarkTreeWithReport`,
+`acceptBookmarkTree*`, `extractBookmarks*`) takes an optional `BookmarkUrlPolicy` as its
+last argument. Pass the same policy everywhere within one operation: sanitising the two
+sides of a comparison under different policies makes the trees permanently unequal.
+
+```ts
+const policy = { allowBookmarklets: settings.syncBookmarklets };
+const tree = acceptBookmarkTree(untrustedValue, policy);
+```
+
+`SyncEngine` does this for you: it reads `syncBookmarklets` from the settings store on
+every tree it touches, so the option takes effect on the next sync. Consumers that
+surface the option must keep the render-time guard above, since the whole point of
+letting `javascript:` into the sync is that it then reaches the bookmark bar.
+
 The recursive transforms (`canonicalizeBookmarks`, `stripIds`, `assignIds`,
 `cleanAllBookmarks`, `threeWayMerge`) assume validated input — that is what bounds their
 recursion depth. Do not call them on unvalidated data.
 
 Filtering is not deletion. Sanitisation decides what the library *accepts*, so a
-bookmarklet the user keeps in the browser is excluded from the sync but is not removed
-from the browser: `SyncEngine` puts such nodes back before the destructive write that
-applies a remote tree. If you write bookmarks yourself, either do the same via
-`sanitizeBookmarkTreeWithReport` / `reinstateRemovedBookmarks`, or tell the user what is
-about to disappear:
+bookmarklet the user keeps in the browser (with `syncBookmarklets` off) is excluded from
+the sync but is not removed from the browser: `SyncEngine` puts such nodes back before
+the destructive write that applies a remote tree. If you write bookmarks yourself,
+either do the same via `sanitizeBookmarkTreeWithReport` / `reinstateRemovedBookmarks`,
+or tell the user what is about to disappear:
 
 ```ts
 import { extractBookmarksWithReport } from '@marksyncorg/core';

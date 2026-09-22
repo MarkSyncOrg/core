@@ -13,6 +13,7 @@ import {
 import {
   acceptBookmarkTree,
   isSafeBookmarkUrl,
+  isSyncableBookmarkUrl,
   MAX_BOOKMARK_DEPTH,
   sanitizeBookmarkTree,
   validateBookmarkTree,
@@ -75,6 +76,28 @@ describe('finding 1 — unsafe bookmark URL schemes', () => {
       { title: 'ok', url: 'https://good.org' },
       { title: 'folder', children: [] },
     ]);
+  });
+
+  // The sync carries more than a page may render (MarkSyncOrg/app-next#37 widened it to
+  // `chrome://`, `file://` and friends). What must not follow is the render guard
+  // widening with it, or the executable schemes slipping in without the user's say-so.
+  it('keeps the render guard narrow even for URLs the sync carries', () => {
+    expect(isSyncableBookmarkUrl('file:///etc/passwd')).toBe(true);
+    expect(isSafeBookmarkUrl('file:///etc/passwd')).toBe(false);
+  });
+
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>'])(
+    'never renders %j, opt-in or not',
+    (url) => {
+      expect(isSyncableBookmarkUrl(url, { allowBookmarklets: true })).toBe(true);
+      expect(isSafeBookmarkUrl(url)).toBe(false);
+    },
+  );
+
+  it('needs an explicit opt-in before an executable URL can reach the browser', () => {
+    const tree: Bookmark[] = [{ title: 'bad', url: 'javascript:alert(1)' }];
+    expect(sanitizeBookmarkTree(tree)).toEqual([]);
+    expect(sanitizeBookmarkTree(tree, { allowBookmarklets: true })).toEqual(tree);
   });
 });
 

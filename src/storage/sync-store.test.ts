@@ -62,6 +62,7 @@ describe('SyncStore', () => {
       syncBookmarksToolbar: true,
       syncOnChange: true,
       syncDirection: 'two-way',
+      syncBookmarklets: false,
     });
   });
 
