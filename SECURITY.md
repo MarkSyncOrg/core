@@ -60,7 +60,9 @@ const tree = acceptBookmarkTree(untrustedValue, policy);
 ```
 
 `SyncEngine` does this for you: it reads `syncBookmarklets` from the settings store on
-every tree it touches, so the option takes effect on the next sync. Consumers that
+every tree it touches, so the option takes effect on the next sync. Tell the user it is
+all-or-nothing across their devices: a device with it off sanitises bookmarklets out of
+the tree it holds, so its next upload removes them from the sync for everyone. Consumers that
 surface the option must keep the render-time guard above, since the whole point of
 letting `javascript:` into the sync is that it then reaches the bookmark bar.
 
